@@ -20,66 +20,129 @@ DECISION_OPTIONS = ["BLOCK_OK", "BLOCK_NOK", "UNSURE"]
 # =========================================================
 # PAGE CSS
 # =========================================================
-st.markdown(
-    """
-    <style>
-    html, body, [data-testid="stAppViewContainer"], .main {
-        height: 100vh !important;
-        overflow: hidden !important;
-    }
+def apply_css(mobile_mode: bool):
+    if mobile_mode:
+        st.markdown(
+            """
+            <style>
+            html, body, [data-testid="stAppViewContainer"], .main {
+                height: auto !important;
+                overflow: auto !important;
+            }
 
-    [data-testid="stHeader"] {
-        height: 0rem;
-    }
+            [data-testid="stHeader"] {
+                height: 0rem;
+            }
 
-    .block-container {
-        padding-top: 0.8rem !important;
-        padding-bottom: 0.4rem !important;
-        max-width: 100% !important;
-        height: 100vh !important;
-        overflow: hidden !important;
-    }
+            .block-container {
+                padding-top: 0.5rem !important;
+                padding-bottom: 1rem !important;
+                max-width: 100% !important;
+                height: auto !important;
+                overflow: visible !important;
+            }
 
-    [data-testid="stSidebar"] {
-        overflow-y: auto !important;
-    }
+            [data-testid="stSidebar"] {
+                overflow-y: auto !important;
+            }
 
-    .review-section-title {
-        font-size: 18px;
-        font-weight: 700;
-        margin-top: 6px;
-        margin-bottom: 8px;
-    }
+            .review-section-title {
+                font-size: 18px;
+                font-weight: 700;
+                margin-top: 6px;
+                margin-bottom: 8px;
+            }
 
-    .top-score-card {
-        border: 1px solid #dfe3e8;
-        border-radius: 10px;
-        padding: 10px 14px;
-        background: #f8f9fa;
-        margin-bottom: 10px;
-        text-align: center;
-    }
+            .top-score-card {
+                border: 1px solid #dfe3e8;
+                border-radius: 10px;
+                padding: 8px 10px;
+                background: #f8f9fa;
+                margin-bottom: 10px;
+                text-align: center;
+            }
 
-    .top-score-label {
-        font-size: 14px;
-        color: #6c757d;
-        margin-bottom: 2px;
-    }
+            .top-score-label {
+                font-size: 12px;
+                color: #6c757d;
+                margin-bottom: 2px;
+            }
 
-    .top-score-value {
-        font-size: 34px;
-        font-weight: 800;
-        line-height: 1.1;
-    }
+            .top-score-value {
+                font-size: 24px;
+                font-weight: 800;
+                line-height: 1.1;
+            }
 
-    .compact-note {
-        font-size: 13px;
-        color: #6c757d;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True
-)
+            .compact-note {
+                font-size: 13px;
+                color: #6c757d;
+            }
+            </style>
+            """,
+            unsafe_allow_html=True
+        )
+    else:
+        st.markdown(
+            """
+            <style>
+            html, body, [data-testid="stAppViewContainer"], .main {
+                height: 100vh !important;
+                overflow: hidden !important;
+            }
+
+            [data-testid="stHeader"] {
+                height: 0rem;
+            }
+
+            .block-container {
+                padding-top: 0.8rem !important;
+                padding-bottom: 0.4rem !important;
+                max-width: 100% !important;
+                height: 100vh !important;
+                overflow: hidden !important;
+            }
+
+            [data-testid="stSidebar"] {
+                overflow-y: auto !important;
+            }
+
+            .review-section-title {
+                font-size: 18px;
+                font-weight: 700;
+                margin-top: 6px;
+                margin-bottom: 8px;
+            }
+
+            .top-score-card {
+                border: 1px solid #dfe3e8;
+                border-radius: 10px;
+                padding: 10px 14px;
+                background: #f8f9fa;
+                margin-bottom: 10px;
+                text-align: center;
+            }
+
+            .top-score-label {
+                font-size: 14px;
+                color: #6c757d;
+                margin-bottom: 2px;
+            }
+
+            .top-score-value {
+                font-size: 34px;
+                font-weight: 800;
+                line-height: 1.1;
+            }
+
+            .compact-note {
+                font-size: 13px;
+                color: #6c757d;
+            }
+            </style>
+            """,
+            unsafe_allow_html=True
+        )
 
 # =========================================================
 # DATA LOADING
@@ -161,7 +224,6 @@ def load_all_cases_for_run(run_id: str) -> pd.DataFrame:
     with engine.connect() as conn:
         return pd.read_sql(query, conn, params={"run_id": run_id})
 
-
 # =========================================================
 # HELPERS
 # =========================================================
@@ -219,6 +281,15 @@ def try_parse_number(x):
         return None
 
 
+def should_hide_parameter(param: str) -> bool:
+    p = str(param).strip().lower()
+    if p == "source_row_id":
+        return True
+    if "source_name" in p:
+        return True
+    return False
+
+
 def compare_values(left_val, right_val, tolerance_pct: float):
     if is_blank(left_val) and is_blank(right_val):
         return "empty_equal", "", ""
@@ -262,6 +333,7 @@ def build_combined_display_df(
     right_title: str
 ) -> pd.DataFrame:
     all_params = list(dict.fromkeys(list(left_dict.keys()) + list(right_dict.keys())))
+    all_params = [p for p in all_params if not should_hide_parameter(p)]
 
     priority_params = ["key_lvl3"]
     remaining_params = [p for p in all_params if p not in priority_params]
@@ -315,7 +387,7 @@ def status_label(status: str, diff_text: str, compare_type: str) -> str:
     return status
 
 
-def render_comparison_table_html(df: pd.DataFrame, left_title: str, right_title: str) -> str:
+def render_comparison_table_html(df: pd.DataFrame, left_title: str, right_title: str, mobile_mode: bool) -> str:
     def bg(status: str) -> str:
         if status == "different":
             return "#f8d7da"
@@ -328,6 +400,10 @@ def render_comparison_table_html(df: pd.DataFrame, left_title: str, right_title:
         if status == "empty_equal":
             return "#f8f9fa"
         return "#ffffff"
+
+    table_height = "auto" if mobile_mode else "calc(100vh - 360px)"
+    min_height = "unset" if mobile_mode else "280px"
+    max_height = "none" if mobile_mode else "calc(100vh - 360px)"
 
     html_rows = []
     for _, row in df.iterrows():
@@ -345,9 +421,9 @@ def render_comparison_table_html(df: pd.DataFrame, left_title: str, right_title:
 
     return f"""
     <div style="
-        height: calc(100vh - 360px);
-        min-height: 280px;
-        max-height: calc(100vh - 360px);
+        height: {table_height};
+        min-height: {min_height};
+        max-height: {max_height};
         overflow-y: auto;
         overflow-x: auto;
         border: 1px solid #ddd;
@@ -370,6 +446,36 @@ def render_comparison_table_html(df: pd.DataFrame, left_title: str, right_title:
       </table>
     </div>
     """
+
+
+def render_mobile_compare_cards(df: pd.DataFrame, left_title: str, right_title: str):
+    color_map = {
+        "different": "#f8d7da",
+        "within_tolerance": "#fff3cd",
+        "normalized_equal": "#fff3cd",
+        "exact_equal": "#d1e7dd",
+        "empty_equal": "#f8f9fa",
+    }
+
+    for _, row in df.iterrows():
+        color = color_map.get(row["_status"], "#ffffff")
+        st.markdown(
+            f"""
+            <div style="
+                background:{color};
+                border:1px solid #ddd;
+                border-radius:10px;
+                padding:10px;
+                margin-bottom:10px;
+            ">
+                <div><b>{html.escape(str(row["Parameter"]))}</b></div>
+                <div style="margin-top:6px;"><b>{html.escape(left_title)}:</b><br>{html.escape(str(row[left_title]))}</div>
+                <div style="margin-top:6px;"><b>{html.escape(right_title)}:</b><br>{html.escape(str(row[right_title]))}</div>
+                <div style="margin-top:6px;"><b>Status:</b> {html.escape(status_label(row["_status"], row["_diff"], row["_compare_type"]))}</div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
 
 
 def show_popup_message(message: str, duration_ms: int = 900):
@@ -561,11 +667,14 @@ def current_session_position(session_case_keys, current_pair_key):
         return session_case_keys.index(current_pair_key) + 1
     return 1
 
-
 # =========================================================
 # APP START
 # =========================================================
 st.title("Blocking Review")
+
+# Mobile toggle first so CSS can react
+mobile_mode = st.sidebar.toggle("Mobile-Modus", value=False)
+apply_css(mobile_mode)
 
 runs_df = load_open_runs()
 
@@ -573,9 +682,6 @@ if len(runs_df) == 0:
     st.success("Keine offenen Runs vorhanden.")
     st.stop()
 
-# =========================================================
-# SIDEBAR CONTROLS
-# =========================================================
 run_options = runs_df["run_id"].tolist()
 run_label_map = {
     row["run_id"]: run_label(row)
@@ -676,20 +782,23 @@ st.sidebar.markdown(
     unsafe_allow_html=True
 )
 
+if mobile_mode:
+    st.markdown(f"**Session-Paar {session_pair_number} / {session_total}**")
+    st.progress(progress_value)
+    st.caption(f"Bereits bearbeitet: {session_reviewed_count} | Noch offen: {len(open_cases_df)}")
+
 # =========================================================
 # TOP INFO + DECISION
 # =========================================================
-header_left, header_right = st.columns([1.0, 2.2])
+score_val = pair_row["score_total"]
+conf_text = "-"
+if pd.notna(score_val):
+    try:
+        conf_text = f"{float(score_val):.4f}"
+    except Exception:
+        conf_text = str(score_val)
 
-with header_left:
-    score_val = pair_row["score_total"]
-    conf_text = "-"
-    if pd.notna(score_val):
-        try:
-            conf_text = f"{float(score_val):.4f}"
-        except Exception:
-            conf_text = str(score_val)
-
+if mobile_mode:
     st.markdown(
         f"""
         <div class="top-score-card">
@@ -710,72 +819,124 @@ with header_left:
         unsafe_allow_html=True
     )
 
-with header_right:
     st.markdown('<div class="review-section-title">Entscheidung</div>', unsafe_allow_html=True)
 
-    decision_left, decision_right = st.columns([1.25, 1.0])
+    decision = st.radio(
+        "Ist diese Kombination im Blocking sinnvoll?",
+        options=DECISION_OPTIONS,
+        horizontal=False,
+        format_func=lambda x: {
+            "BLOCK_OK": "Blocking passt",
+            "BLOCK_NOK": "Blocking passt nicht",
+            "UNSURE": "Unklar"
+        }.get(x, x)
+    )
 
-    with decision_left:
-        decision = st.radio(
-            "Ist diese Kombination im Blocking sinnvoll?",
-            options=DECISION_OPTIONS,
-            horizontal=True,
-            format_func=lambda x: {
-                "BLOCK_OK": "Blocking passt",
-                "BLOCK_NOK": "Blocking passt nicht",
-                "UNSURE": "Unklar"
-            }.get(x, x)
+    comment = st.text_area("Kommentar", height=120)
+
+    back = st.button("Zurueck", use_container_width=True)
+    save_next = st.button("Speichern + Weiter", use_container_width=True)
+    skip_next = st.button("Weiter ohne Speichern", use_container_width=True)
+
+else:
+    header_left, header_right = st.columns([1.0, 2.2])
+
+    with header_left:
+        st.markdown(
+            f"""
+            <div class="top-score-card">
+                <div class="top-score-label">Confidence Score</div>
+                <div class="top-score-value">{html.escape(conf_text)}</div>
+            </div>
+            """,
+            unsafe_allow_html=True
         )
 
-    with decision_right:
-        comment = st.text_area("Kommentar", height=95)
+        st.markdown(
+            f"""
+            <div class="compact-note">
+                Session-Paar {session_pair_number} / {session_total}<br>
+                {html.escape(left_title_dynamic)} vs {html.escape(right_title_dynamic)}
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
 
-    btn1, btn2, btn3 = st.columns([1, 1.5, 1.2])
+    with header_right:
+        st.markdown('<div class="review-section-title">Entscheidung</div>', unsafe_allow_html=True)
 
-    with btn1:
-        if st.button("Zurueck", use_container_width=True):
-            prev_key = find_prev_open_pair_key(
-                session_case_keys=session_case_keys,
-                open_cases_df=open_cases_df,
-                current_pair_key=current_pair_key
-            )
-            if prev_key is not None:
-                st.session_state["current_pair_key"] = prev_key
-            st.rerun()
+        decision_left, decision_right = st.columns([1.25, 1.0])
 
-    with btn2:
-        if st.button("Speichern + Weiter", use_container_width=True):
-            current_key_before_save = current_pair_key
-
-            save_decision(pair_row, decision, comment, reviewer)
-            st.cache_data.clear()
-
-            new_open_cases_df = load_open_cases(selected_run_id)
-            next_key = find_next_open_pair_key(
-                session_case_keys=session_case_keys,
-                open_cases_df=new_open_cases_df,
-                current_pair_key=current_key_before_save
+        with decision_left:
+            decision = st.radio(
+                "Ist diese Kombination im Blocking sinnvoll?",
+                options=DECISION_OPTIONS,
+                horizontal=True,
+                format_func=lambda x: {
+                    "BLOCK_OK": "Blocking passt",
+                    "BLOCK_NOK": "Blocking passt nicht",
+                    "UNSURE": "Unklar"
+                }.get(x, x)
             )
 
-            st.session_state["current_pair_key"] = next_key
+        with decision_right:
+            comment = st.text_area("Kommentar", height=95)
 
-            try:
-                st.toast("Gespeichert")
-            except Exception:
-                pass
-            show_popup_message("Gespeichert", duration_ms=900)
-            st.rerun()
+        btn1, btn2, btn3 = st.columns([1, 1.5, 1.2])
 
-    with btn3:
-        if st.button("Weiter ohne Speichern", use_container_width=True):
-            next_key = find_next_open_pair_key(
-                session_case_keys=session_case_keys,
-                open_cases_df=open_cases_df,
-                current_pair_key=current_pair_key
-            )
-            if next_key is not None:
-                st.session_state["current_pair_key"] = next_key
-            st.rerun()
+        with btn1:
+            back = st.button("Zurueck", use_container_width=True)
+
+        with btn2:
+            save_next = st.button("Speichern + Weiter", use_container_width=True)
+
+        with btn3:
+            skip_next = st.button("Weiter ohne Speichern", use_container_width=True)
+
+# =========================================================
+# NAVIGATION ACTIONS
+# =========================================================
+if back:
+    prev_key = find_prev_open_pair_key(
+        session_case_keys=session_case_keys,
+        open_cases_df=open_cases_df,
+        current_pair_key=current_pair_key
+    )
+    if prev_key is not None:
+        st.session_state["current_pair_key"] = prev_key
+    st.rerun()
+
+if save_next:
+    current_key_before_save = current_pair_key
+
+    save_decision(pair_row, decision, comment, reviewer)
+    st.cache_data.clear()
+
+    new_open_cases_df = load_open_cases(selected_run_id)
+    next_key = find_next_open_pair_key(
+        session_case_keys=session_case_keys,
+        open_cases_df=new_open_cases_df,
+        current_pair_key=current_key_before_save
+    )
+
+    st.session_state["current_pair_key"] = next_key
+
+    try:
+        st.toast("Gespeichert")
+    except Exception:
+        pass
+    show_popup_message("Gespeichert", duration_ms=900)
+    st.rerun()
+
+if skip_next:
+    next_key = find_next_open_pair_key(
+        session_case_keys=session_case_keys,
+        open_cases_df=open_cases_df,
+        current_pair_key=current_pair_key
+    )
+    if next_key is not None:
+        st.session_state["current_pair_key"] = next_key
+    st.rerun()
 
 # =========================================================
 # COMPARISON TABLE
@@ -788,10 +949,17 @@ comparison_df = build_combined_display_df(
     right_title_dynamic
 )
 
-comparison_html = render_comparison_table_html(
-    comparison_df,
-    left_title_dynamic,
-    right_title_dynamic
-)
-
-st.markdown(comparison_html, unsafe_allow_html=True)
+if mobile_mode:
+    render_mobile_compare_cards(
+        comparison_df,
+        left_title_dynamic,
+        right_title_dynamic
+    )
+else:
+    comparison_html = render_comparison_table_html(
+        comparison_df,
+        left_title_dynamic,
+        right_title_dynamic,
+        mobile_mode=False
+    )
+    st.markdown(comparison_html, unsafe_allow_html=True)

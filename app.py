@@ -139,6 +139,29 @@ def load_open_cases(run_id: str) -> pd.DataFrame:
         return pd.read_sql(query, conn, params={"run_id": run_id})
 
 
+@st.cache_data(ttl=10)
+def load_all_cases_for_run(run_id: str) -> pd.DataFrame:
+    query = text("""
+        select
+            pair_key,
+            run_id,
+            pair_id,
+            left_source,
+            right_source,
+            left_id,
+            right_id,
+            score_total,
+            left_payload,
+            right_payload,
+            status
+        from review.review_cases
+        where run_id = :run_id
+        order by score_total asc nulls last, pair_key asc
+    """)
+    with engine.connect() as conn:
+        return pd.read_sql(query, conn, params={"run_id": run_id})
+
+
 # =========================================================
 # HELPERS
 # =========================================================
@@ -322,9 +345,9 @@ def render_comparison_table_html(df: pd.DataFrame, left_title: str, right_title:
 
     return f"""
     <div style="
-        height: calc(100vh - 420px);
-        min-height: 260px;
-        max-height: calc(100vh - 420px);
+        height: calc(100vh - 360px);
+        min-height: 280px;
+        max-height: calc(100vh - 360px);
         overflow-y: auto;
         overflow-x: auto;
         border: 1px solid #ddd;
@@ -465,9 +488,78 @@ def save_decision(pair_row, decision: str, comment: str, reviewer: str):
 def run_label(row) -> str:
     left_source = str(row.get("left_source", ""))
     right_source = str(row.get("right_source", ""))
-    run_id = str(row.get("run_id", ""))
     open_case_count = row.get("open_case_count", 0)
     return f"{left_source} vs {right_source} | offen: {open_case_count}"
+
+
+def init_session_for_run(selected_run_id: str, all_cases_df: pd.DataFrame):
+    current_signature = f"{selected_run_id}|{len(all_cases_df)}"
+    if st.session_state.get("run_signature") != current_signature:
+        st.session_state["run_signature"] = current_signature
+        st.session_state["active_run_id"] = selected_run_id
+        st.session_state["session_case_keys"] = all_cases_df["pair_key"].astype(str).tolist()
+        st.session_state["session_total"] = len(all_cases_df)
+        st.session_state["current_pair_key"] = None
+
+
+def find_next_open_pair_key(session_case_keys, open_cases_df, current_pair_key=None):
+    open_keys = set(open_cases_df["pair_key"].astype(str).tolist())
+    if not open_keys:
+        return None
+
+    if current_pair_key is None:
+        for key in session_case_keys:
+            if key in open_keys:
+                return key
+        return None
+
+    try:
+        start_idx = session_case_keys.index(current_pair_key)
+    except ValueError:
+        start_idx = -1
+
+    for i in range(start_idx + 1, len(session_case_keys)):
+        if session_case_keys[i] in open_keys:
+            return session_case_keys[i]
+
+    for i in range(0, start_idx + 1):
+        if session_case_keys[i] in open_keys:
+            return session_case_keys[i]
+
+    return None
+
+
+def find_prev_open_pair_key(session_case_keys, open_cases_df, current_pair_key=None):
+    open_keys = set(open_cases_df["pair_key"].astype(str).tolist())
+    if not open_keys:
+        return None
+
+    if current_pair_key is None:
+        for key in session_case_keys:
+            if key in open_keys:
+                return key
+        return None
+
+    try:
+        start_idx = session_case_keys.index(current_pair_key)
+    except ValueError:
+        start_idx = len(session_case_keys)
+
+    for i in range(start_idx - 1, -1, -1):
+        if session_case_keys[i] in open_keys:
+            return session_case_keys[i]
+
+    for i in range(len(session_case_keys) - 1, start_idx - 1, -1):
+        if session_case_keys[i] in open_keys:
+            return session_case_keys[i]
+
+    return None
+
+
+def current_session_position(session_case_keys, current_pair_key):
+    if current_pair_key in session_case_keys:
+        return session_case_keys.index(current_pair_key) + 1
+    return 1
 
 
 # =========================================================
@@ -482,7 +574,7 @@ if len(runs_df) == 0:
     st.stop()
 
 # =========================================================
-# TOP LEFT RUN SELECTOR
+# SIDEBAR CONTROLS
 # =========================================================
 run_options = runs_df["run_id"].tolist()
 run_label_map = {
@@ -490,33 +582,53 @@ run_label_map = {
     for _, row in runs_df.iterrows()
 }
 
-top_left, top_right = st.columns([1.4, 2.2])
+selected_run_id = st.sidebar.selectbox(
+    "Review-Run auswählen",
+    options=run_options,
+    format_func=lambda x: run_label_map.get(x, x),
+)
 
-with top_left:
-    selected_run_id = st.selectbox(
-        "Review-Run auswählen",
-        options=run_options,
-        format_func=lambda x: run_label_map.get(x, x),
-    )
-
-if st.session_state.get("active_run_id") != selected_run_id:
-    st.session_state["active_run_id"] = selected_run_id
-    st.session_state["idx"] = 0
+reviewer = st.sidebar.text_input(
+    "Reviewer",
+    value=st.session_state.get("reviewer_name", "user"),
+    key="reviewer_name"
+)
 
 selected_run_row = runs_df[runs_df["run_id"] == selected_run_id].iloc[0]
-cases_df = load_open_cases(selected_run_id)
 
-if len(cases_df) == 0:
-    st.warning("Dieser Run hat keine offenen Fälle mehr.")
+all_cases_df = load_all_cases_for_run(selected_run_id)
+open_cases_df = load_open_cases(selected_run_id)
+
+init_session_for_run(selected_run_id, all_cases_df)
+
+session_case_keys = st.session_state["session_case_keys"]
+session_total = st.session_state["session_total"]
+
+if len(open_cases_df) == 0:
+    st.success("Dieser Run hat keine offenen Fälle mehr.")
     st.cache_data.clear()
     st.stop()
 
-if "idx" not in st.session_state:
-    st.session_state["idx"] = 0
+if (
+    st.session_state.get("current_pair_key") is None
+    or st.session_state.get("current_pair_key") not in set(open_cases_df["pair_key"].astype(str))
+):
+    st.session_state["current_pair_key"] = find_next_open_pair_key(
+        session_case_keys=session_case_keys,
+        open_cases_df=open_cases_df,
+        current_pair_key=None
+    )
 
-st.session_state["idx"] = max(0, min(st.session_state["idx"], len(cases_df) - 1))
-idx = st.session_state["idx"]
-pair_row = cases_df.iloc[idx]
+current_pair_key = st.session_state["current_pair_key"]
+
+if current_pair_key is None:
+    st.success("Dieser Run hat keine offenen Fälle mehr.")
+    st.cache_data.clear()
+    st.stop()
+
+pair_row = open_cases_df[
+    open_cases_df["pair_key"].astype(str) == str(current_pair_key)
+].iloc[0]
 
 left_payload = parse_payload(pair_row["left_payload"])
 right_payload = parse_payload(pair_row["right_payload"])
@@ -524,19 +636,18 @@ right_payload = parse_payload(pair_row["right_payload"])
 left_title_dynamic = str(pair_row.get("left_source", "Left"))
 right_title_dynamic = str(pair_row.get("right_source", "Right"))
 
-# =========================================================
-# SIDEBAR
-# =========================================================
-open_case_count = len(cases_df)
-current_pair_number = idx + 1
-progress_value = current_pair_number / open_case_count if open_case_count > 0 else 1.0
+session_pair_number = current_session_position(session_case_keys, current_pair_key)
+session_reviewed_count = session_total - len(open_cases_df)
+progress_value = session_reviewed_count / session_total if session_total > 0 else 1.0
 
-st.sidebar.write(f"Session-Paar {current_pair_number} / {open_case_count}")
+# =========================================================
+# SIDEBAR STATUS
+# =========================================================
+st.sidebar.write(f"Session-Paar {session_pair_number} / {session_total}")
 st.sidebar.progress(progress_value)
+st.sidebar.write(f"Bereits bearbeitet: {session_reviewed_count}")
+st.sidebar.write(f"Noch offen: {len(open_cases_df)}")
 st.sidebar.write(f"Run ID: {selected_run_id}")
-st.sidebar.write(f"Quelle links: {selected_run_row['left_source']}")
-st.sidebar.write(f"Quelle rechts: {selected_run_row['right_source']}")
-st.sidebar.write(f"Noch offen: {open_case_count}")
 
 tolerance_pct = st.sidebar.number_input(
     "Toleranz in Prozent",
@@ -592,7 +703,7 @@ with header_left:
     st.markdown(
         f"""
         <div class="compact-note">
-            Fall {idx + 1} / {len(cases_df)}<br>
+            Session-Paar {session_pair_number} / {session_total}<br>
             {html.escape(left_title_dynamic)} vs {html.escape(right_title_dynamic)}
         </div>
         """,
@@ -602,12 +713,9 @@ with header_left:
 with header_right:
     st.markdown('<div class="review-section-title">Entscheidung</div>', unsafe_allow_html=True)
 
-    reviewer_default = st.session_state.get("reviewer_name", "user")
-
     decision_left, decision_right = st.columns([1.25, 1.0])
 
     with decision_left:
-        reviewer = st.text_input("Reviewer", value=reviewer_default, key="reviewer_name")
         decision = st.radio(
             "Ist diese Kombination im Blocking sinnvoll?",
             options=DECISION_OPTIONS,
@@ -626,24 +734,47 @@ with header_right:
 
     with btn1:
         if st.button("Zurueck", use_container_width=True):
-            st.session_state["idx"] = max(0, st.session_state["idx"] - 1)
+            prev_key = find_prev_open_pair_key(
+                session_case_keys=session_case_keys,
+                open_cases_df=open_cases_df,
+                current_pair_key=current_pair_key
+            )
+            if prev_key is not None:
+                st.session_state["current_pair_key"] = prev_key
             st.rerun()
 
     with btn2:
         if st.button("Speichern + Weiter", use_container_width=True):
+            current_key_before_save = current_pair_key
+
             save_decision(pair_row, decision, comment, reviewer)
             st.cache_data.clear()
+
+            new_open_cases_df = load_open_cases(selected_run_id)
+            next_key = find_next_open_pair_key(
+                session_case_keys=session_case_keys,
+                open_cases_df=new_open_cases_df,
+                current_pair_key=current_key_before_save
+            )
+
+            st.session_state["current_pair_key"] = next_key
+
             try:
                 st.toast("Gespeichert")
             except Exception:
                 pass
             show_popup_message("Gespeichert", duration_ms=900)
-            st.session_state["idx"] = min(len(cases_df) - 1, st.session_state["idx"] + 1)
             st.rerun()
 
     with btn3:
         if st.button("Weiter ohne Speichern", use_container_width=True):
-            st.session_state["idx"] = min(len(cases_df) - 1, st.session_state["idx"] + 1)
+            next_key = find_next_open_pair_key(
+                session_case_keys=session_case_keys,
+                open_cases_df=open_cases_df,
+                current_pair_key=current_pair_key
+            )
+            if next_key is not None:
+                st.session_state["current_pair_key"] = next_key
             st.rerun()
 
 # =========================================================

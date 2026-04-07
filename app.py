@@ -712,7 +712,9 @@ session_total = st.session_state["session_total"]
 
 if len(open_cases_df) == 0:
     st.success("Dieser Run hat keine offenen Fälle mehr.")
-    st.cache_data.clear()
+    load_open_cases.clear()
+    load_open_runs.clear()
+    load_all_cases_for_run.clear()
     st.stop()
 
 if (
@@ -729,7 +731,9 @@ current_pair_key = st.session_state["current_pair_key"]
 
 if current_pair_key is None:
     st.success("Dieser Run hat keine offenen Fälle mehr.")
-    st.cache_data.clear()
+    load_open_cases.clear()
+    load_open_runs.clear()
+    load_all_cases_for_run.clear()
     st.stop()
 
 pair_row = open_cases_df[
@@ -744,7 +748,9 @@ right_title_dynamic = str(pair_row.get("right_source", "Right"))
 
 session_pair_number = current_session_position(session_case_keys, current_pair_key)
 session_reviewed_count = session_total - len(open_cases_df)
-progress_value = session_reviewed_count / session_total if session_total > 0 else 1.0
+
+# Progressbar = aktuelle Position im stabilen Session-Run
+progress_value = session_pair_number / session_total if session_total > 0 else 1.0
 
 # =========================================================
 # SIDEBAR STATUS
@@ -910,7 +916,10 @@ if save_next:
     current_key_before_save = current_pair_key
 
     save_decision(pair_row, decision, comment, reviewer)
-    st.cache_data.clear()
+
+    # Nur relevante Caches leeren, damit die App schneller bleibt
+    load_open_cases.clear()
+    load_open_runs.clear()
 
     new_open_cases_df = load_open_cases(selected_run_id)
     next_key = find_next_open_pair_key(

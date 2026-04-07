@@ -667,6 +667,11 @@ def current_session_position(session_case_keys, current_pair_key):
         return session_case_keys.index(current_pair_key) + 1
     return 1
 
+def get_open_keys_from_df(df: pd.DataFrame):
+    if df is None or len(df) == 0 or "pair_key" not in df.columns:
+        return set()
+    return set(df["pair_key"].astype(str).tolist())
+
 # =========================================================
 # APP START
 # =========================================================
@@ -917,18 +922,36 @@ if save_next:
 
     save_decision(pair_row, decision, comment, reviewer)
 
-    # Nur relevante Caches leeren, damit die App schneller bleibt
-    load_open_cases.clear()
-    load_open_runs.clear()
+    # Lokale offene Menge ableiten statt sofort nochmal DB zu lesen
+    current_open_keys = get_open_keys_from_df(open_cases_df)
+    current_open_keys.discard(str(current_key_before_save))
 
-    new_open_cases_df = load_open_cases(selected_run_id)
-    next_key = find_next_open_pair_key(
-        session_case_keys=session_case_keys,
-        open_cases_df=new_open_cases_df,
-        current_pair_key=current_key_before_save
-    )
+    if current_open_keys:
+        next_key = None
+        try:
+            start_idx = session_case_keys.index(current_key_before_save)
+        except ValueError:
+            start_idx = -1
+
+        for i in range(start_idx + 1, len(session_case_keys)):
+            if session_case_keys[i] in current_open_keys:
+                next_key = session_case_keys[i]
+                break
+
+        if next_key is None:
+            for i in range(0, start_idx + 1):
+                if session_case_keys[i] in current_open_keys:
+                    next_key = session_case_keys[i]
+                    break
+    else:
+        next_key = None
 
     st.session_state["current_pair_key"] = next_key
+
+    # Nur notwendige Caches invalidieren
+    load_open_cases.clear()
+    load_open_runs.clear()
+    load_all_cases_for_run.clear()
 
     try:
         st.toast("Gespeichert")

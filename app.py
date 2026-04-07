@@ -33,8 +33,8 @@ st.markdown(
     }
 
     .block-container {
-        padding-top: 1rem !important;
-        padding-bottom: 0.5rem !important;
+        padding-top: 0.8rem !important;
+        padding-bottom: 0.4rem !important;
         max-width: 100% !important;
         height: 100vh !important;
         overflow: hidden !important;
@@ -49,6 +49,32 @@ st.markdown(
         font-weight: 700;
         margin-top: 6px;
         margin-bottom: 8px;
+    }
+
+    .top-score-card {
+        border: 1px solid #dfe3e8;
+        border-radius: 10px;
+        padding: 10px 14px;
+        background: #f8f9fa;
+        margin-bottom: 10px;
+        text-align: center;
+    }
+
+    .top-score-label {
+        font-size: 14px;
+        color: #6c757d;
+        margin-bottom: 2px;
+    }
+
+    .top-score-value {
+        font-size: 34px;
+        font-weight: 800;
+        line-height: 1.1;
+    }
+
+    .compact-note {
+        font-size: 13px;
+        color: #6c757d;
     }
     </style>
     """,
@@ -296,9 +322,9 @@ def render_comparison_table_html(df: pd.DataFrame, left_title: str, right_title:
 
     return f"""
     <div style="
-        height: calc(100vh - 560px);
-        min-height: 220px;
-        max-height: calc(100vh - 560px);
+        height: calc(100vh - 420px);
+        min-height: 260px;
+        max-height: calc(100vh - 420px);
         overflow-y: auto;
         overflow-x: auto;
         border: 1px solid #ddd;
@@ -441,7 +467,7 @@ def run_label(row) -> str:
     right_source = str(row.get("right_source", ""))
     run_id = str(row.get("run_id", ""))
     open_case_count = row.get("open_case_count", 0)
-    return f"{left_source} vs {right_source} | offen: {open_case_count} | {run_id}"
+    return f"{left_source} vs {right_source} | offen: {open_case_count}"
 
 
 # =========================================================
@@ -455,17 +481,23 @@ if len(runs_df) == 0:
     st.success("Keine offenen Runs vorhanden.")
     st.stop()
 
+# =========================================================
+# TOP LEFT RUN SELECTOR
+# =========================================================
 run_options = runs_df["run_id"].tolist()
 run_label_map = {
     row["run_id"]: run_label(row)
     for _, row in runs_df.iterrows()
 }
 
-selected_run_id = st.selectbox(
-    "Review-Run auswählen",
-    options=run_options,
-    format_func=lambda x: run_label_map.get(x, x),
-)
+top_left, top_right = st.columns([1.4, 2.2])
+
+with top_left:
+    selected_run_id = st.selectbox(
+        "Review-Run auswählen",
+        options=run_options,
+        format_func=lambda x: run_label_map.get(x, x),
+    )
 
 if st.session_state.get("active_run_id") != selected_run_id:
     st.session_state["active_run_id"] = selected_run_id
@@ -484,7 +516,6 @@ if "idx" not in st.session_state:
 
 st.session_state["idx"] = max(0, min(st.session_state["idx"], len(cases_df) - 1))
 idx = st.session_state["idx"]
-
 pair_row = cases_df.iloc[idx]
 
 left_payload = parse_payload(pair_row["left_payload"])
@@ -496,11 +527,16 @@ right_title_dynamic = str(pair_row.get("right_source", "Right"))
 # =========================================================
 # SIDEBAR
 # =========================================================
-st.sidebar.write(f"Run: {selected_run_id}")
+open_case_count = len(cases_df)
+current_pair_number = idx + 1
+progress_value = current_pair_number / open_case_count if open_case_count > 0 else 1.0
+
+st.sidebar.write(f"Session-Paar {current_pair_number} / {open_case_count}")
+st.sidebar.progress(progress_value)
+st.sidebar.write(f"Run ID: {selected_run_id}")
 st.sidebar.write(f"Quelle links: {selected_run_row['left_source']}")
 st.sidebar.write(f"Quelle rechts: {selected_run_row['right_source']}")
-st.sidebar.write(f"Offene Fälle: {len(cases_df)}")
-st.sidebar.write(f"Ausgewählter Fall: {idx + 1} / {len(cases_df)}")
+st.sidebar.write(f"Noch offen: {open_case_count}")
 
 tolerance_pct = st.sidebar.number_input(
     "Toleranz in Prozent",
@@ -517,7 +553,7 @@ st.sidebar.markdown(
       <div style="width:18px;height:18px;background:#f8d7da;border:1px solid #ccc;"></div><div>Rot = unterschiedlich</div>
     </div>
     <div style="display:flex; gap:8px; align-items:center; margin-bottom:6px;">
-        <div style="width:18px;height:18px;background:#fff3cd;border:1px solid #ccc;"></div><div>Gelb = innerhalb Prozent-Toleranz / Text fast gleich</div>
+      <div style="width:18px;height:18px;background:#fff3cd;border:1px solid #ccc;"></div><div>Gelb = innerhalb Prozent-Toleranz / Text fast gleich</div>
     </div>
     <div style="display:flex; gap:8px; align-items:center; margin-bottom:6px;">
       <div style="width:18px;height:18px;background:#d1e7dd;border:1px solid #ccc;"></div><div>Gruen = exakt gleich</div>
@@ -530,102 +566,85 @@ st.sidebar.markdown(
 )
 
 # =========================================================
-# HEADER / SCORE
+# TOP INFO + DECISION
 # =========================================================
-st.markdown(
-    f"""
-    <div style="font-size:28px; font-weight:800; margin-bottom:10px;">
-        Fall {idx + 1} / {len(cases_df)}
-    </div>
-    """,
-    unsafe_allow_html=True
-)
+header_left, header_right = st.columns([1.0, 2.2])
 
-score_val = pair_row["score_total"]
-conf_text = "-"
-if pd.notna(score_val):
-    try:
-        conf_text = f"{float(score_val):.4f}"
-    except Exception:
-        conf_text = str(score_val)
+with header_left:
+    score_val = pair_row["score_total"]
+    conf_text = "-"
+    if pd.notna(score_val):
+        try:
+            conf_text = f"{float(score_val):.4f}"
+        except Exception:
+            conf_text = str(score_val)
 
-st.markdown(
-    f"""
-    <div style="
-        border: 1px solid #dfe3e8;
-        border-radius: 10px;
-        padding: 10px 14px;
-        background: #f8f9fa;
-        margin-bottom: 10px;
-        text-align: center;
-    ">
-        <div style="font-size: 14px; color: #6c757d; margin-bottom: 2px;">Confidence Score</div>
-        <div style="font-size: 34px; font-weight: 800; line-height: 1.1;">{html.escape(conf_text)}</div>
-    </div>
-    """,
-    unsafe_allow_html=True
-)
-
-col1, col2 = st.columns(2)
-
-with col1:
-    st.markdown("### Left")
-    st.write(f"Source: {pair_row['left_source']}")
-    st.write(f"ID: {pair_row['left_id']}")
-
-with col2:
-    st.markdown("### Right")
-    st.write(f"Source: {pair_row['right_source']}")
-    st.write(f"ID: {pair_row['right_id']}")
-
-# =========================================================
-# DECISION
-# =========================================================
-st.markdown('<div class="review-section-title">Entscheidung</div>', unsafe_allow_html=True)
-
-reviewer_default = st.session_state.get("reviewer_name", "user")
-
-col_decision, col_comment = st.columns([1.25, 1.0])
-
-with col_decision:
-    reviewer = st.text_input("Reviewer", value=reviewer_default, key="reviewer_name")
-    decision = st.radio(
-        "Ist diese Kombination im Blocking sinnvoll?",
-        options=DECISION_OPTIONS,
-        horizontal=True,
-        format_func=lambda x: {
-            "BLOCK_OK": "Blocking passt",
-            "BLOCK_NOK": "Blocking passt nicht",
-            "UNSURE": "Unklar"
-        }.get(x, x)
+    st.markdown(
+        f"""
+        <div class="top-score-card">
+            <div class="top-score-label">Confidence Score</div>
+            <div class="top-score-value">{html.escape(conf_text)}</div>
+        </div>
+        """,
+        unsafe_allow_html=True
     )
 
-with col_comment:
-    comment = st.text_area("Kommentar", height=95)
+    st.markdown(
+        f"""
+        <div class="compact-note">
+            Fall {idx + 1} / {len(cases_df)}<br>
+            {html.escape(left_title_dynamic)} vs {html.escape(right_title_dynamic)}
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
-btn1, btn2, btn3 = st.columns([1, 1.5, 1.2])
+with header_right:
+    st.markdown('<div class="review-section-title">Entscheidung</div>', unsafe_allow_html=True)
 
-with btn1:
-    if st.button("Zurueck", use_container_width=True):
-        st.session_state["idx"] = max(0, st.session_state["idx"] - 1)
-        st.rerun()
+    reviewer_default = st.session_state.get("reviewer_name", "user")
 
-with btn2:
-    if st.button("Speichern + Weiter", use_container_width=True):
-        save_decision(pair_row, decision, comment, reviewer)
-        st.cache_data.clear()
-        try:
-            st.toast("Gespeichert")
-        except Exception:
-            pass
-        show_popup_message("Gespeichert", duration_ms=900)
-        st.session_state["idx"] = min(len(cases_df) - 1, st.session_state["idx"] + 1)
-        st.rerun()
+    decision_left, decision_right = st.columns([1.25, 1.0])
 
-with btn3:
-    if st.button("Weiter ohne Speichern", use_container_width=True):
-        st.session_state["idx"] = min(len(cases_df) - 1, st.session_state["idx"] + 1)
-        st.rerun()
+    with decision_left:
+        reviewer = st.text_input("Reviewer", value=reviewer_default, key="reviewer_name")
+        decision = st.radio(
+            "Ist diese Kombination im Blocking sinnvoll?",
+            options=DECISION_OPTIONS,
+            horizontal=True,
+            format_func=lambda x: {
+                "BLOCK_OK": "Blocking passt",
+                "BLOCK_NOK": "Blocking passt nicht",
+                "UNSURE": "Unklar"
+            }.get(x, x)
+        )
+
+    with decision_right:
+        comment = st.text_area("Kommentar", height=95)
+
+    btn1, btn2, btn3 = st.columns([1, 1.5, 1.2])
+
+    with btn1:
+        if st.button("Zurueck", use_container_width=True):
+            st.session_state["idx"] = max(0, st.session_state["idx"] - 1)
+            st.rerun()
+
+    with btn2:
+        if st.button("Speichern + Weiter", use_container_width=True):
+            save_decision(pair_row, decision, comment, reviewer)
+            st.cache_data.clear()
+            try:
+                st.toast("Gespeichert")
+            except Exception:
+                pass
+            show_popup_message("Gespeichert", duration_ms=900)
+            st.session_state["idx"] = min(len(cases_df) - 1, st.session_state["idx"] + 1)
+            st.rerun()
+
+    with btn3:
+        if st.button("Weiter ohne Speichern", use_container_width=True):
+            st.session_state["idx"] = min(len(cases_df) - 1, st.session_state["idx"] + 1)
+            st.rerun()
 
 # =========================================================
 # COMPARISON TABLE

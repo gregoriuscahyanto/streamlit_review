@@ -7,12 +7,30 @@ from sqlalchemy import create_engine, text
 
 st.set_page_config(page_title="Blocking Review", layout="wide")
 
-DB_URL = st.secrets["DB_URL"]
-RUN_ID = st.secrets["RUN_ID"]
+DB_URL = st.secrets.get("DB_URL")
+if not DB_URL:
+    st.error("Secret DB_URL fehlt.")
+    st.stop()
 
 engine = create_engine(DB_URL)
-
 DECISION_OPTIONS = ["BLOCK_OK", "BLOCK_NOK", "UNSURE"]
+
+
+@st.cache_data(ttl=10)
+def load_open_runs() -> pd.DataFrame:
+    query = text("""
+        select
+            run_id,
+            left_source,
+            right_source,
+            status,
+            created_at
+        from review.review_runs
+        where status = 'open'
+        order by created_at desc nulls last, run_id desc
+    """)
+    with engine.connect() as conn:
+        return pd.read_sql(query, conn)
 
 
 @st.cache_data(ttl=10)
@@ -21,6 +39,9 @@ def load_open_cases(run_id: str) -> pd.DataFrame:
         select
             pair_key,
             run_id,
+            pair_id,
+            left_source,
+            right_source,
             left_id,
             right_id,
             score_total,
@@ -105,7 +126,7 @@ def save_decision(pair_row, decision: str, comment: str, reviewer: str):
         """), {
             "run_id": pair_row["run_id"],
             "pair_key": pair_row["pair_key"],
-            "pair_id": pair_row["pair_key"],
+            "pair_id": pair_row["pair_id"],
             "left_id": pair_row["left_id"],
             "right_id": pair_row["right_id"],
             "decision": decision,
@@ -125,19 +146,73 @@ def save_decision(pair_row, decision: str, comment: str, reviewer: str):
             "run_id": pair_row["run_id"],
         })
 
+        remaining_open = conn.execute(text("""
+            select count(*) as n
+            from review.review_cases
+            where run_id = :run_id
+              and status = 'open'
+        """), {
+            "run_id": pair_row["run_id"],
+        }).scalar_one()
+
+        if remaining_open == 0:
+            conn.execute(text("""
+                update review.review_runs
+                set status = 'reviewed',
+                    updated_at = now()
+                where run_id = :run_id
+            """), {
+                "run_id": pair_row["run_id"],
+            })
+
+
+def run_label(row) -> str:
+    left_source = str(row.get("left_source", ""))
+    right_source = str(row.get("right_source", ""))
+    run_id = str(row.get("run_id", ""))
+    return f"{left_source} vs {right_source} | {run_id}"
+
 
 st.title("Blocking Review")
 
-st.write(f"**Run ID:** {RUN_ID}")
+runs_df = load_open_runs()
 
-cases_df = load_open_cases(RUN_ID)
+if len(runs_df) == 0:
+    st.success("Keine offenen Runs vorhanden.")
+    st.stop()
+
+run_options = runs_df["run_id"].tolist()
+run_label_map = {
+    row["run_id"]: run_label(row)
+    for _, row in runs_df.iterrows()
+}
+
+selected_run_id = st.selectbox(
+    "Review-Run auswählen",
+    options=run_options,
+    format_func=lambda x: run_label_map.get(x, x),
+)
+
+if st.session_state.get("active_run_id") != selected_run_id:
+    st.session_state["active_run_id"] = selected_run_id
+    st.session_state["idx"] = 0
+
+selected_run_row = runs_df[runs_df["run_id"] == selected_run_id].iloc[0]
+
+st.write(
+    f"**Quelle:** {selected_run_row['left_source']} vs {selected_run_row['right_source']}"
+)
+st.write(f"**Run ID:** {selected_run_id}")
+
+cases_df = load_open_cases(selected_run_id)
+
+if len(cases_df) == 0:
+    st.warning("Dieser Run hat keine offenen Fälle mehr.")
+    st.cache_data.clear()
+    st.stop()
 
 if "idx" not in st.session_state:
     st.session_state["idx"] = 0
-
-if len(cases_df) == 0:
-    st.success("Keine offenen Review-Fälle mehr vorhanden.")
-    st.stop()
 
 st.session_state["idx"] = max(0, min(st.session_state["idx"], len(cases_df) - 1))
 idx = st.session_state["idx"]
@@ -161,10 +236,12 @@ col1, col2 = st.columns(2)
 
 with col1:
     st.markdown("### Left")
+    st.write(f"Source: {pair_row['left_source']}")
     st.write(f"ID: {pair_row['left_id']}")
 
 with col2:
     st.markdown("### Right")
+    st.write(f"Source: {pair_row['right_source']}")
     st.write(f"ID: {pair_row['right_id']}")
 
 st.dataframe(compare_df, use_container_width=True, hide_index=True)
@@ -190,7 +267,6 @@ with btn2:
     if st.button("Speichern + Weiter", use_container_width=True):
         save_decision(pair_row, decision, comment, reviewer)
         st.cache_data.clear()
-        st.session_state["idx"] = min(st.session_state["idx"], max(0, len(cases_df) - 2))
         st.success("Gespeichert")
         st.rerun()
 

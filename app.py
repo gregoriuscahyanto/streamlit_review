@@ -9,13 +9,31 @@ from sqlalchemy import create_engine, text
 
 st.set_page_config(page_title="Blocking Review", layout="wide")
 
+DECISION_OPTIONS = ["BLOCK_OK", "BLOCK_NOK", "UNSURE"]
+CLAIM_TIMEOUT_MINUTES = 30
+REQUIRED_LOCK_COLUMNS = {"locked_by", "locked_at"}
+
+
+@st.cache_resource
+def get_engine(db_url: str):
+    return create_engine(
+        db_url,
+        pool_pre_ping=True,
+        pool_recycle=1800,
+        pool_size=5,
+        max_overflow=10,
+        pool_timeout=30,
+        future=True,
+    )
+
+
 DB_URL = st.secrets.get("DB_URL")
 if not DB_URL:
     st.error("Secret DB_URL fehlt.")
     st.stop()
 
-engine = create_engine(DB_URL)
-DECISION_OPTIONS = ["BLOCK_OK", "BLOCK_NOK", "UNSURE"]
+engine = get_engine(DB_URL)
+
 
 # =========================================================
 # PAGE CSS
@@ -29,30 +47,29 @@ def apply_css(mobile_mode: bool):
                 height: auto !important;
                 overflow: auto !important;
             }
-
-            [data-testid="stHeader"] {
-                height: 0rem;
-            }
-
+            [data-testid="stHeader"] { height: 0rem; }
             .block-container {
-                padding-top: 0.5rem !important;
+                padding-top: 1.2rem !important;
                 padding-bottom: 1rem !important;
                 max-width: 100% !important;
                 height: auto !important;
                 overflow: visible !important;
             }
-
-            [data-testid="stSidebar"] {
-                overflow-y: auto !important;
+            [data-testid="stSidebar"] { overflow-y: auto !important; }
+            .app-main-title {
+                font-size: 2.4rem;
+                font-weight: 800;
+                line-height: 1.1;
+                margin-top: 0.2rem;
+                margin-bottom: 1rem;
+                padding-top: 0.1rem;
             }
-
             .review-section-title {
                 font-size: 18px;
                 font-weight: 700;
                 margin-top: 6px;
                 margin-bottom: 8px;
             }
-
             .top-score-card {
                 border: 1px solid #dfe3e8;
                 border-radius: 10px;
@@ -61,26 +78,12 @@ def apply_css(mobile_mode: bool):
                 margin-bottom: 10px;
                 text-align: center;
             }
-
-            .top-score-label {
-                font-size: 12px;
-                color: #6c757d;
-                margin-bottom: 2px;
-            }
-
-            .top-score-value {
-                font-size: 24px;
-                font-weight: 800;
-                line-height: 1.1;
-            }
-
-            .compact-note {
-                font-size: 13px;
-                color: #6c757d;
-            }
+            .top-score-label { font-size: 12px; color: #6c757d; margin-bottom: 2px; }
+            .top-score-value { font-size: 24px; font-weight: 800; line-height: 1.1; }
+            .compact-note { font-size: 13px; color: #6c757d; }
             </style>
             """,
-            unsafe_allow_html=True
+            unsafe_allow_html=True,
         )
     else:
         st.markdown(
@@ -90,30 +93,29 @@ def apply_css(mobile_mode: bool):
                 height: 100vh !important;
                 overflow: hidden !important;
             }
-
-            [data-testid="stHeader"] {
-                height: 0rem;
-            }
-
+            [data-testid="stHeader"] { height: 0rem; }
             .block-container {
-                padding-top: 0.8rem !important;
+                padding-top: 1.4rem !important;
                 padding-bottom: 0.4rem !important;
                 max-width: 100% !important;
                 height: 100vh !important;
                 overflow: hidden !important;
             }
-
-            [data-testid="stSidebar"] {
-                overflow-y: auto !important;
+            [data-testid="stSidebar"] { overflow-y: auto !important; }
+            .app-main-title {
+                font-size: 3rem;
+                font-weight: 800;
+                line-height: 1.05;
+                margin-top: 0.15rem;
+                margin-bottom: 1rem;
+                padding-top: 0.15rem;
             }
-
             .review-section-title {
                 font-size: 18px;
                 font-weight: 700;
                 margin-top: 6px;
                 margin-bottom: 8px;
             }
-
             .top-score-card {
                 border: 1px solid #dfe3e8;
                 border-radius: 10px;
@@ -122,34 +124,37 @@ def apply_css(mobile_mode: bool):
                 margin-bottom: 10px;
                 text-align: center;
             }
-
-            .top-score-label {
-                font-size: 14px;
-                color: #6c757d;
-                margin-bottom: 2px;
-            }
-
-            .top-score-value {
-                font-size: 34px;
-                font-weight: 800;
-                line-height: 1.1;
-            }
-
-            .compact-note {
-                font-size: 13px;
-                color: #6c757d;
-            }
+            .top-score-label { font-size: 14px; color: #6c757d; margin-bottom: 2px; }
+            .top-score-value { font-size: 34px; font-weight: 800; line-height: 1.1; }
+            .compact-note { font-size: 13px; color: #6c757d; }
             </style>
             """,
-            unsafe_allow_html=True
+            unsafe_allow_html=True,
         )
 
+
 # =========================================================
-# DATA LOADING
+# DB / MULTI USER HELPERS
 # =========================================================
+def ensure_lock_columns():
+    query = text(
+        """
+        select column_name
+        from information_schema.columns
+        where table_schema = 'review'
+          and table_name = 'review_cases'
+        """
+    )
+    with engine.connect() as conn:
+        cols = {row[0] for row in conn.execute(query).fetchall()}
+    missing = REQUIRED_LOCK_COLUMNS - cols
+    return missing
+
+
 @st.cache_data(ttl=10)
 def load_open_runs() -> pd.DataFrame:
-    query = text("""
+    query = text(
+        """
         select
             r.run_id,
             r.left_source,
@@ -173,38 +178,16 @@ def load_open_runs() -> pd.DataFrame:
             r.updated_at desc nulls last,
             r.created_at desc nulls last,
             r.run_id desc
-    """)
+        """
+    )
     with engine.connect() as conn:
         return pd.read_sql(query, conn)
 
 
 @st.cache_data(ttl=10)
-def load_open_cases(run_id: str) -> pd.DataFrame:
-    query = text("""
-        select
-            pair_key,
-            run_id,
-            pair_id,
-            left_source,
-            right_source,
-            left_id,
-            right_id,
-            score_total,
-            left_payload,
-            right_payload,
-            status
-        from review.review_cases
-        where run_id = :run_id
-          and status = 'open'
-        order by score_total asc nulls last, pair_key asc
-    """)
-    with engine.connect() as conn:
-        return pd.read_sql(query, conn, params={"run_id": run_id})
-
-
-@st.cache_data(ttl=10)
 def load_all_cases_for_run(run_id: str) -> pd.DataFrame:
-    query = text("""
+    query = text(
+        """
         select
             pair_key,
             run_id,
@@ -216,16 +199,402 @@ def load_all_cases_for_run(run_id: str) -> pd.DataFrame:
             score_total,
             left_payload,
             right_payload,
-            status
+            status,
+            locked_by,
+            locked_at
         from review.review_cases
         where run_id = :run_id
         order by score_total asc nulls last, pair_key asc
-    """)
+        """
+    )
     with engine.connect() as conn:
         return pd.read_sql(query, conn, params={"run_id": run_id})
+
+
+@st.cache_data(ttl=5)
+def load_run_stats(run_id: str, reviewer: str) -> dict:
+    query = text(
+        """
+        select
+            count(*) filter (where status = 'open') as open_count,
+            count(*) filter (where status = 'in_review') as locked_count,
+            count(*) filter (where status = 'in_review' and locked_by = :reviewer) as my_locked_count,
+            count(*) filter (where status = 'reviewed') as reviewed_count,
+            count(*) as total_count
+        from review.review_cases
+        where run_id = :run_id
+        """
+    )
+    with engine.connect() as conn:
+        row = conn.execute(query, {"run_id": run_id, "reviewer": reviewer}).mappings().one()
+        return dict(row)
+
+
+@st.cache_data(ttl=5)
+def load_claimed_case(run_id: str, reviewer: str, pair_key: str | None) -> pd.DataFrame:
+    if not pair_key:
+        return pd.DataFrame()
+    query = text(
+        """
+        select
+            pair_key,
+            run_id,
+            pair_id,
+            left_source,
+            right_source,
+            left_id,
+            right_id,
+            score_total,
+            left_payload,
+            right_payload,
+            status,
+            locked_by,
+            locked_at
+        from review.review_cases
+        where run_id = :run_id
+          and pair_key = :pair_key
+          and (
+                status = 'open'
+                or (status = 'in_review' and locked_by = :reviewer)
+              )
+        """
+    )
+    with engine.connect() as conn:
+        return pd.read_sql(query, conn, params={"run_id": run_id, "pair_key": pair_key, "reviewer": reviewer})
+
+
+@st.cache_data(ttl=5)
+def load_my_claimed_keys(run_id: str, reviewer: str) -> list[str]:
+    query = text(
+        """
+        select pair_key
+        from review.review_cases
+        where run_id = :run_id
+          and status = 'in_review'
+          and locked_by = :reviewer
+        order by score_total asc nulls last, pair_key asc
+        """
+    )
+    with engine.connect() as conn:
+        return [str(r[0]) for r in conn.execute(query, {"run_id": run_id, "reviewer": reviewer}).fetchall()]
+
+
+@st.cache_data(ttl=5)
+def load_reviewed_count(run_id: str) -> int:
+    query = text(
+        """
+        select count(*)
+        from review.review_cases
+        where run_id = :run_id
+          and status = 'reviewed'
+        """
+    )
+    with engine.connect() as conn:
+        return int(conn.execute(query, {"run_id": run_id}).scalar_one())
+
+
+def clear_runtime_caches():
+    load_open_runs.clear()
+    load_all_cases_for_run.clear()
+    load_run_stats.clear()
+    load_claimed_case.clear()
+    load_my_claimed_keys.clear()
+    load_reviewed_count.clear()
+
+
+def cleanup_stale_claims(run_id: str | None = None):
+    where_run = "and run_id = :run_id" if run_id else ""
+    params = {"minutes": CLAIM_TIMEOUT_MINUTES}
+    if run_id:
+        params["run_id"] = run_id
+    query = text(
+        f"""
+        update review.review_cases
+        set status = 'open',
+            locked_by = null,
+            locked_at = null,
+            updated_at = now()
+        where status = 'in_review'
+          and locked_at < now() - (:minutes * interval '1 minute')
+          {where_run}
+        """
+    )
+    with engine.begin() as conn:
+        conn.execute(query, params)
+
+
+def release_claim(run_id: str, reviewer: str, pair_key: str | None, to_open: bool = True):
+    if not pair_key:
+        return
+    new_status = "open" if to_open else "reviewed"
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                update review.review_cases
+                set status = :new_status,
+                    locked_by = null,
+                    locked_at = null,
+                    updated_at = now()
+                where run_id = :run_id
+                  and pair_key = :pair_key
+                  and status = 'in_review'
+                  and locked_by = :reviewer
+                """
+            ),
+            {
+                "new_status": new_status,
+                "run_id": run_id,
+                "pair_key": pair_key,
+                "reviewer": reviewer,
+            },
+        )
+
+
+def claim_case(run_id: str, reviewer: str, preferred_pair_key: str | None = None, exclude_pair_key: str | None = None):
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                update review.review_cases
+                set status = 'open',
+                    locked_by = null,
+                    locked_at = null,
+                    updated_at = now()
+                where run_id = :run_id
+                  and status = 'in_review'
+                  and locked_at < now() - (:minutes * interval '1 minute')
+                """
+            ),
+            {"run_id": run_id, "minutes": CLAIM_TIMEOUT_MINUTES},
+        )
+
+        if preferred_pair_key:
+            row = conn.execute(
+                text(
+                    """
+                    update review.review_cases
+                    set status = 'in_review',
+                        locked_by = :reviewer,
+                        locked_at = now(),
+                        updated_at = now()
+                    where run_id = :run_id
+                      and pair_key = :pair_key
+                      and (
+                            status = 'open'
+                            or (status = 'in_review' and locked_by = :reviewer)
+                          )
+                    returning
+                        pair_key,
+                        run_id,
+                        pair_id,
+                        left_source,
+                        right_source,
+                        left_id,
+                        right_id,
+                        score_total,
+                        left_payload,
+                        right_payload,
+                        status,
+                        locked_by,
+                        locked_at
+                    """
+                ),
+                {"run_id": run_id, "pair_key": preferred_pair_key, "reviewer": reviewer},
+            ).mappings().first()
+            if row:
+                return dict(row)
+
+        row = conn.execute(
+            text(
+                """
+                select
+                    pair_key,
+                    run_id,
+                    pair_id,
+                    left_source,
+                    right_source,
+                    left_id,
+                    right_id,
+                    score_total,
+                    left_payload,
+                    right_payload,
+                    status,
+                    locked_by,
+                    locked_at
+                from review.review_cases
+                where run_id = :run_id
+                  and status = 'in_review'
+                  and locked_by = :reviewer
+                  and (:exclude_pair_key is null or pair_key <> :exclude_pair_key)
+                order by score_total asc nulls last, pair_key asc
+                limit 1
+                """
+            ),
+            {"run_id": run_id, "reviewer": reviewer, "exclude_pair_key": exclude_pair_key},
+        ).mappings().first()
+        if row:
+            return dict(row)
+
+        row = conn.execute(
+            text(
+                """
+                with candidate as (
+                    select pair_key
+                    from review.review_cases
+                    where run_id = :run_id
+                      and status = 'open'
+                      and (:exclude_pair_key is null or pair_key <> :exclude_pair_key)
+                    order by score_total asc nulls last, pair_key asc
+                    for update skip locked
+                    limit 1
+                )
+                update review.review_cases c
+                set status = 'in_review',
+                    locked_by = :reviewer,
+                    locked_at = now(),
+                    updated_at = now()
+                from candidate
+                where c.run_id = :run_id
+                  and c.pair_key = candidate.pair_key
+                returning
+                    c.pair_key,
+                    c.run_id,
+                    c.pair_id,
+                    c.left_source,
+                    c.right_source,
+                    c.left_id,
+                    c.right_id,
+                    c.score_total,
+                    c.left_payload,
+                    c.right_payload,
+                    c.status,
+                    c.locked_by,
+                    c.locked_at
+                """
+            ),
+            {"run_id": run_id, "reviewer": reviewer, "exclude_pair_key": exclude_pair_key},
+        ).mappings().first()
+        return dict(row) if row else None
+
+
+def save_decision(pair_row, decision: str, comment: str, reviewer: str):
+    with engine.begin() as conn:
+        pair_key = pair_row["pair_key"]
+        run_id = pair_row["run_id"]
+
+        current = conn.execute(
+            text(
+                """
+                select status, locked_by
+                from review.review_cases
+                where run_id = :run_id
+                  and pair_key = :pair_key
+                for update
+                """
+            ),
+            {"run_id": run_id, "pair_key": pair_key},
+        ).mappings().first()
+
+        if not current:
+            return False, "Fall nicht mehr gefunden."
+
+        if current["status"] == "reviewed":
+            return False, "Dieser Fall wurde bereits von jemand anderem gespeichert."
+
+        if current["status"] != "in_review" or current["locked_by"] != reviewer:
+            return False, "Dieser Fall ist nicht mehr fuer dich reserviert."
+
+        conn.execute(
+            text(
+                """
+                insert into review.review_labels (
+                    run_id,
+                    pair_key,
+                    pair_id,
+                    left_id,
+                    right_id,
+                    decision,
+                    comment,
+                    reviewer,
+                    timestamp
+                )
+                select
+                    :run_id,
+                    :pair_key,
+                    :pair_id,
+                    :left_id,
+                    :right_id,
+                    :decision,
+                    :comment,
+                    :reviewer,
+                    :timestamp
+                where not exists (
+                    select 1
+                    from review.review_labels
+                    where run_id = :run_id
+                      and pair_key = :pair_key
+                )
+                """
+            ),
+            {
+                "run_id": pair_row["run_id"],
+                "pair_key": pair_row["pair_key"],
+                "pair_id": pair_row["pair_id"],
+                "left_id": pair_row["left_id"],
+                "right_id": pair_row["right_id"],
+                "decision": decision,
+                "comment": comment,
+                "reviewer": reviewer,
+                "timestamp": datetime.utcnow(),
+            },
+        )
+
+        conn.execute(
+            text(
+                """
+                update review.review_cases
+                set status = 'reviewed',
+                    locked_by = null,
+                    locked_at = null,
+                    updated_at = now()
+                where pair_key = :pair_key
+                  and run_id = :run_id
+                """
+            ),
+            {"pair_key": pair_row["pair_key"], "run_id": pair_row["run_id"]},
+        )
+
+        remaining_open = conn.execute(
+            text(
+                """
+                select count(*) as n
+                from review.review_cases
+                where run_id = :run_id
+                  and status in ('open', 'in_review')
+                """
+            ),
+            {"run_id": pair_row["run_id"]},
+        ).scalar_one()
+
+        if remaining_open == 0:
+            conn.execute(
+                text(
+                    """
+                    update review.review_runs
+                    set status = 'reviewed',
+                        updated_at = now()
+                    where run_id = :run_id
+                    """
+                ),
+                {"run_id": pair_row["run_id"]},
+            )
+
+    return True, "Gespeichert"
+
 
 # =========================================================
-# HELPERS
+# GENERIC HELPERS
 # =========================================================
 def parse_payload(payload):
     if payload is None:
@@ -260,13 +629,10 @@ def is_blank(x) -> bool:
 def try_parse_number(x):
     if pd.isna(x):
         return None
-
     s = str(x).strip()
     if s == "":
         return None
-
     s = s.replace("%", "").replace(" ", "")
-
     if "," in s and "." in s:
         if s.rfind(".") > s.rfind(","):
             s = s.replace(",", "")
@@ -274,7 +640,6 @@ def try_parse_number(x):
             s = s.replace(".", "").replace(",", ".")
     elif "," in s:
         s = s.replace(",", ".")
-
     try:
         return float(s)
     except Exception:
@@ -283,11 +648,7 @@ def try_parse_number(x):
 
 def should_hide_parameter(param: str) -> bool:
     p = str(param).strip().lower()
-    if p == "source_row_id":
-        return True
-    if "source_name" in p:
-        return True
-    return False
+    return p == "source_row_id" or "source_name" in p
 
 
 def compare_values(left_val, right_val, tolerance_pct: float):
@@ -299,22 +660,17 @@ def compare_values(left_val, right_val, tolerance_pct: float):
 
     if left_num is not None and right_num is not None:
         diff_abs = abs(left_num - right_num)
-
         if diff_abs == 0:
             return "exact_equal", "0%", "numeric"
-
         base = max(abs(left_num), abs(right_num))
         pct_diff = 0.0 if base == 0 else (diff_abs / base) * 100.0
         diff_text = f"{pct_diff:.2f}%"
-
         if pct_diff <= tolerance_pct:
             return "within_tolerance", diff_text, "numeric"
-
         return "different", diff_text, "numeric"
 
     left_txt = normalize_text_for_compare(left_val)
     right_txt = normalize_text_for_compare(right_val)
-
     if left_txt == right_txt:
         raw_left = "" if pd.isna(left_val) else str(left_val)
         raw_right = "" if pd.isna(right_val) else str(right_val)
@@ -325,13 +681,7 @@ def compare_values(left_val, right_val, tolerance_pct: float):
     return "different", "", "text"
 
 
-def build_combined_display_df(
-    left_dict: dict,
-    right_dict: dict,
-    tolerance_pct: float,
-    left_title: str,
-    right_title: str
-) -> pd.DataFrame:
+def build_combined_display_df(left_dict: dict, right_dict: dict, tolerance_pct: float, left_title: str, right_title: str) -> pd.DataFrame:
     all_params = list(dict.fromkeys(list(left_dict.keys()) + list(right_dict.keys())))
     all_params = [p for p in all_params if not should_hide_parameter(p)]
 
@@ -343,28 +693,30 @@ def build_combined_display_df(
     for param in ordered_params:
         left_val = left_dict.get(param, "")
         right_val = right_dict.get(param, "")
-
         status, diff_text, compare_type = compare_values(left_val, right_val, tolerance_pct)
-
-        rows.append({
-            "Parameter": str(param),
-            left_title: "" if pd.isna(left_val) else str(left_val),
-            right_title: "" if pd.isna(right_val) else str(right_val),
-            "_status": status,
-            "_diff": diff_text,
-            "_compare_type": compare_type
-        })
+        if status == "empty_equal":
+            continue
+        rows.append(
+            {
+                "Parameter": str(param),
+                left_title: "" if pd.isna(left_val) else str(left_val),
+                right_title: "" if pd.isna(right_val) else str(right_val),
+                "_status": status,
+                "_diff": diff_text,
+                "_compare_type": compare_type,
+            }
+        )
 
     df = pd.DataFrame(rows)
+    if df.empty:
+        return df
 
     status_rank = {
-        "different": 0,
+        "exact_equal": 0,
         "within_tolerance": 1,
-        "normalized_equal": 2,
-        "exact_equal": 3,
-        "empty_equal": 4
+        "normalized_equal": 1,
+        "different": 2,
     }
-
     df["_priority"] = df["Parameter"].apply(lambda x: 0 if x == "key_lvl3" else 1)
     df["_sort_rank"] = df["_status"].map(status_rank).fillna(99)
     df = df.sort_values(["_priority", "_sort_rank", "Parameter"], kind="stable").reset_index(drop=True)
@@ -373,17 +725,13 @@ def build_combined_display_df(
 
 def status_label(status: str, diff_text: str, compare_type: str) -> str:
     if status == "different":
-        if compare_type == "numeric" and diff_text:
-            return f"DIFF ({diff_text})"
-        return "DIFF"
+        return f"DIFF ({diff_text})" if compare_type == "numeric" and diff_text else "DIFF"
     if status == "within_tolerance":
         return f"TOL ({diff_text})" if diff_text else "TOL"
     if status == "normalized_equal":
         return "TEXT_EQ"
     if status == "exact_equal":
         return "EQ"
-    if status == "empty_equal":
-        return "EMPTY"
     return status
 
 
@@ -391,46 +739,30 @@ def render_comparison_table_html(df: pd.DataFrame, left_title: str, right_title:
     def bg(status: str) -> str:
         if status == "different":
             return "#f8d7da"
-        if status == "within_tolerance":
-            return "#fff3cd"
-        if status == "normalized_equal":
+        if status in ("within_tolerance", "normalized_equal"):
             return "#fff3cd"
         if status == "exact_equal":
             return "#d1e7dd"
-        if status == "empty_equal":
-            return "#f8f9fa"
         return "#ffffff"
 
-    table_height = "auto" if mobile_mode else "calc(100vh - 360px)"
+    table_height = "auto" if mobile_mode else "calc(100vh - 380px)"
     min_height = "unset" if mobile_mode else "280px"
-    max_height = "none" if mobile_mode else "calc(100vh - 360px)"
+    max_height = "none" if mobile_mode else "calc(100vh - 380px)"
 
     html_rows = []
     for _, row in df.iterrows():
-        status = row["_status"]
-        color = bg(status)
-
+        color = bg(row["_status"])
         html_rows.append(
             "<tr>"
             f"<td style='padding:8px;border:1px solid #ddd;background:{color};vertical-align:top;'><b>{html.escape(str(row['Parameter']))}</b></td>"
             f"<td style='padding:8px;border:1px solid #ddd;background:{color};vertical-align:top;white-space:pre-wrap;word-break:break-word;'>{html.escape(str(row[left_title]))}</td>"
             f"<td style='padding:8px;border:1px solid #ddd;background:{color};vertical-align:top;white-space:pre-wrap;word-break:break-word;'>{html.escape(str(row[right_title]))}</td>"
-            f"<td style='padding:8px;border:1px solid #ddd;background:{color};vertical-align:top;'><b>{html.escape(status_label(status, row['_diff'], row['_compare_type']))}</b></td>"
+            f"<td style='padding:8px;border:1px solid #ddd;background:{color};vertical-align:top;'><b>{html.escape(status_label(row['_status'], row['_diff'], row['_compare_type']))}</b></td>"
             "</tr>"
         )
 
     return f"""
-    <div style="
-        height: {table_height};
-        min-height: {min_height};
-        max-height: {max_height};
-        overflow-y: auto;
-        overflow-x: auto;
-        border: 1px solid #ddd;
-        border-radius: 8px;
-        box-sizing: border-box;
-        background: white;
-    ">
+    <div style="height:{table_height}; min-height:{min_height}; max-height:{max_height}; overflow-y:auto; overflow-x:auto; border:1px solid #ddd; border-radius:8px; box-sizing:border-box; background:white;">
       <table style="border-collapse:collapse; width:100%; font-size:14px; table-layout:fixed;">
         <thead style="position:sticky; top:0; z-index:2;">
           <tr>
@@ -440,9 +772,7 @@ def render_comparison_table_html(df: pd.DataFrame, left_title: str, right_title:
             <th style="text-align:left; padding:10px; border:1px solid #ddd; background:#f1f3f5; width:12%;">Status</th>
           </tr>
         </thead>
-        <tbody>
-          {''.join(html_rows)}
-        </tbody>
+        <tbody>{''.join(html_rows)}</tbody>
       </table>
     </div>
     """
@@ -454,58 +784,28 @@ def render_mobile_compare_cards(df: pd.DataFrame, left_title: str, right_title: 
         "within_tolerance": "#fff3cd",
         "normalized_equal": "#fff3cd",
         "exact_equal": "#d1e7dd",
-        "empty_equal": "#f8f9fa",
     }
-
     for _, row in df.iterrows():
         color = color_map.get(row["_status"], "#ffffff")
         st.markdown(
             f"""
-            <div style="
-                background:{color};
-                border:1px solid #ddd;
-                border-radius:10px;
-                padding:10px;
-                margin-bottom:10px;
-            ">
-                <div><b>{html.escape(str(row["Parameter"]))}</b></div>
+            <div style="background:{color}; border:1px solid #ddd; border-radius:10px; padding:10px; margin-bottom:10px;">
+                <div><b>{html.escape(str(row['Parameter']))}</b></div>
                 <div style="margin-top:6px;"><b>{html.escape(left_title)}:</b><br>{html.escape(str(row[left_title]))}</div>
                 <div style="margin-top:6px;"><b>{html.escape(right_title)}:</b><br>{html.escape(str(row[right_title]))}</div>
-                <div style="margin-top:6px;"><b>Status:</b> {html.escape(status_label(row["_status"], row["_diff"], row["_compare_type"]))}</div>
+                <div style="margin-top:6px;"><b>Status:</b> {html.escape(status_label(row['_status'], row['_diff'], row['_compare_type']))}</div>
             </div>
             """,
-            unsafe_allow_html=True
+            unsafe_allow_html=True,
         )
 
 
 def show_popup_message(message: str, duration_ms: int = 900):
-    text = html.escape(message)
-
+    text_msg = html.escape(message)
     popup_html = f"""
-    <div id="save-popup-overlay" style="
-        position: fixed;
-        inset: 0;
-        z-index: 999998;
-        background: rgba(128, 128, 128, 0.45);
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        opacity: 1;
-        transition: opacity 0.3s ease;
-        backdrop-filter: blur(1px);
-    ">
-        <div id="save-popup" style="
-            background: white;
-            color: #222;
-            padding: 16px 22px;
-            border-radius: 12px;
-            box-shadow: 0 12px 32px rgba(0,0,0,0.25);
-            font-weight: 600;
-            font-size: 15px;
-            min-width: 180px;
-            text-align: center;
-        ">
-            {text}
+    <div id="save-popup-overlay" style="position:fixed; inset:0; z-index:999998; background:rgba(128,128,128,0.45); display:flex; align-items:center; justify-content:center; opacity:1; transition:opacity 0.3s ease; backdrop-filter:blur(1px);">
+        <div id="save-popup" style="background:white; color:#222; padding:16px 22px; border-radius:12px; box-shadow:0 12px 32px rgba(0,0,0,0.25); font-weight:600; font-size:15px; min-width:180px; text-align:center;">
+            {text_msg}
         </div>
     </div>
     <script>
@@ -513,9 +813,7 @@ def show_popup_message(message: str, duration_ms: int = 900):
             var overlay = window.parent.document.getElementById("save-popup-overlay");
             if (overlay) {{
                 overlay.style.opacity = "0";
-                setTimeout(function() {{
-                    if (overlay) overlay.remove();
-                }}, 350);
+                setTimeout(function() {{ if (overlay) overlay.remove(); }}, 350);
             }}
         }}, {duration_ms});
     </script>
@@ -523,143 +821,35 @@ def show_popup_message(message: str, duration_ms: int = 900):
     st.components.v1.html(popup_html, height=0)
 
 
-def save_decision(pair_row, decision: str, comment: str, reviewer: str):
-    with engine.begin() as conn:
-        conn.execute(text("""
-            insert into review.review_labels (
-                run_id,
-                pair_key,
-                pair_id,
-                left_id,
-                right_id,
-                decision,
-                comment,
-                reviewer,
-                timestamp
-            )
-            values (
-                :run_id,
-                :pair_key,
-                :pair_id,
-                :left_id,
-                :right_id,
-                :decision,
-                :comment,
-                :reviewer,
-                :timestamp
-            )
-        """), {
-            "run_id": pair_row["run_id"],
-            "pair_key": pair_row["pair_key"],
-            "pair_id": pair_row["pair_id"],
-            "left_id": pair_row["left_id"],
-            "right_id": pair_row["right_id"],
-            "decision": decision,
-            "comment": comment,
-            "reviewer": reviewer,
-            "timestamp": datetime.utcnow(),
-        })
-
-        conn.execute(text("""
-            update review.review_cases
-            set status = 'reviewed',
-                updated_at = now()
-            where pair_key = :pair_key
-              and run_id = :run_id
-        """), {
-            "pair_key": pair_row["pair_key"],
-            "run_id": pair_row["run_id"],
-        })
-
-        remaining_open = conn.execute(text("""
-            select count(*) as n
-            from review.review_cases
-            where run_id = :run_id
-              and status = 'open'
-        """), {
-            "run_id": pair_row["run_id"],
-        }).scalar_one()
-
-        if remaining_open == 0:
-            conn.execute(text("""
-                update review.review_runs
-                set status = 'reviewed',
-                    updated_at = now()
-                where run_id = :run_id
-            """), {
-                "run_id": pair_row["run_id"],
-            })
-
-
 def run_label(row) -> str:
-    left_source = str(row.get("left_source", ""))
-    right_source = str(row.get("right_source", ""))
-    open_case_count = row.get("open_case_count", 0)
-    return f"{left_source} vs {right_source} | offen: {open_case_count}"
+    return f"{row.get('left_source', '')} vs {row.get('right_source', '')} | offen: {row.get('open_case_count', 0)}"
 
 
-def init_session_for_run(selected_run_id: str, all_cases_df: pd.DataFrame):
+def init_session_for_run(selected_run_id: str, all_cases_df: pd.DataFrame, force_reset: bool = False):
     current_signature = f"{selected_run_id}|{len(all_cases_df)}"
-    if st.session_state.get("run_signature") != current_signature:
+    if force_reset or st.session_state.get("run_signature") != current_signature:
         st.session_state["run_signature"] = current_signature
         st.session_state["active_run_id"] = selected_run_id
         st.session_state["session_case_keys"] = all_cases_df["pair_key"].astype(str).tolist()
         st.session_state["session_total"] = len(all_cases_df)
         st.session_state["current_pair_key"] = None
+        st.session_state["pair_history"] = []
 
 
-def find_next_open_pair_key(session_case_keys, open_cases_df, current_pair_key=None):
-    open_keys = set(open_cases_df["pair_key"].astype(str).tolist())
-    if not open_keys:
-        return None
-
-    if current_pair_key is None:
-        for key in session_case_keys:
-            if key in open_keys:
-                return key
-        return None
-
-    try:
-        start_idx = session_case_keys.index(current_pair_key)
-    except ValueError:
-        start_idx = -1
-
-    for i in range(start_idx + 1, len(session_case_keys)):
-        if session_case_keys[i] in open_keys:
-            return session_case_keys[i]
-
-    for i in range(0, start_idx + 1):
-        if session_case_keys[i] in open_keys:
-            return session_case_keys[i]
-
-    return None
-
-
-def find_prev_open_pair_key(session_case_keys, open_cases_df, current_pair_key=None):
-    open_keys = set(open_cases_df["pair_key"].astype(str).tolist())
-    if not open_keys:
-        return None
-
-    if current_pair_key is None:
-        for key in session_case_keys:
-            if key in open_keys:
-                return key
-        return None
-
-    try:
-        start_idx = session_case_keys.index(current_pair_key)
-    except ValueError:
-        start_idx = len(session_case_keys)
-
-    for i in range(start_idx - 1, -1, -1):
-        if session_case_keys[i] in open_keys:
-            return session_case_keys[i]
-
-    for i in range(len(session_case_keys) - 1, start_idx - 1, -1):
-        if session_case_keys[i] in open_keys:
-            return session_case_keys[i]
-
-    return None
+def on_run_change():
+    old_run = st.session_state.get("selected_run_id")
+    old_pair_key = st.session_state.get("current_pair_key")
+    reviewer = st.session_state.get("reviewer_name", "user")
+    if old_run and old_pair_key and reviewer:
+        try:
+            release_claim(old_run, reviewer, old_pair_key, to_open=True)
+        except Exception:
+            pass
+    st.session_state["selected_run_id"] = st.session_state["run_selectbox"]
+    st.session_state["force_reset_run"] = True
+    st.session_state["current_pair_key"] = None
+    st.session_state["pair_history"] = []
+    clear_runtime_caches()
 
 
 def current_session_position(session_case_keys, current_pair_key):
@@ -667,20 +857,34 @@ def current_session_position(session_case_keys, current_pair_key):
         return session_case_keys.index(current_pair_key) + 1
     return 1
 
-def get_open_keys_from_df(df: pd.DataFrame):
-    if df is None or len(df) == 0 or "pair_key" not in df.columns:
-        return set()
-    return set(df["pair_key"].astype(str).tolist())
 
 # =========================================================
 # APP START
 # =========================================================
-st.title("Blocking Review")
+missing_lock_columns = ensure_lock_columns()
+if missing_lock_columns:
+    st.error("Multi-User-Locking braucht neue Spalten in review.review_cases.")
+    st.code(
+        """
+ALTER TABLE review.review_cases
+ADD COLUMN IF NOT EXISTS locked_by text,
+ADD COLUMN IF NOT EXISTS locked_at timestamptz;
 
-# Mobile toggle first so CSS can react
+CREATE INDEX IF NOT EXISTS ix_review_cases_run_status_score
+ON review.review_cases (run_id, status, score_total, pair_key);
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_review_labels_run_pair
+ON review.review_labels (run_id, pair_key);
+        """.strip(),
+        language="sql",
+    )
+    st.stop()
+
 mobile_mode = st.sidebar.toggle("Mobile-Modus", value=False)
 apply_css(mobile_mode)
+st.markdown('<div class="app-main-title">Blocking Review</div>', unsafe_allow_html=True)
 
+cleanup_stale_claims()
 runs_df = load_open_runs()
 
 if len(runs_df) == 0:
@@ -688,74 +892,76 @@ if len(runs_df) == 0:
     st.stop()
 
 run_options = runs_df["run_id"].tolist()
-run_label_map = {
-    row["run_id"]: run_label(row)
-    for _, row in runs_df.iterrows()
-}
+run_label_map = {row["run_id"]: run_label(row) for _, row in runs_df.iterrows()}
+
+if "selected_run_id" not in st.session_state or st.session_state["selected_run_id"] not in run_options:
+    st.session_state["selected_run_id"] = run_options[0]
 
 selected_run_id = st.sidebar.selectbox(
     "Review-Run auswählen",
     options=run_options,
+    index=run_options.index(st.session_state["selected_run_id"]),
     format_func=lambda x: run_label_map.get(x, x),
+    key="run_selectbox",
+    on_change=on_run_change,
 )
+selected_run_id = st.session_state.get("selected_run_id", selected_run_id)
 
 reviewer = st.sidebar.text_input(
     "Reviewer",
     value=st.session_state.get("reviewer_name", "user"),
-    key="reviewer_name"
+    key="reviewer_name",
 )
-
-selected_run_row = runs_df[runs_df["run_id"] == selected_run_id].iloc[0]
+reviewer = reviewer.strip()
+if not reviewer:
+    st.warning("Bitte Reviewer eintragen.")
+    st.stop()
 
 all_cases_df = load_all_cases_for_run(selected_run_id)
-open_cases_df = load_open_cases(selected_run_id)
-
-init_session_for_run(selected_run_id, all_cases_df)
+force_reset_run = st.session_state.pop("force_reset_run", False)
+init_session_for_run(selected_run_id, all_cases_df, force_reset=force_reset_run)
 
 session_case_keys = st.session_state["session_case_keys"]
 session_total = st.session_state["session_total"]
+stats = load_run_stats(selected_run_id, reviewer)
 
-if len(open_cases_df) == 0:
-    st.success("Dieser Run hat keine offenen Fälle mehr.")
-    load_open_cases.clear()
-    load_open_runs.clear()
-    load_all_cases_for_run.clear()
+if (stats.get("open_count", 0) + stats.get("my_locked_count", 0)) == 0:
+    st.success("Dieser Run hat keine offenen Faelle mehr fuer dich.")
+    clear_runtime_caches()
     st.stop()
 
-if (
-    st.session_state.get("current_pair_key") is None
-    or st.session_state.get("current_pair_key") not in set(open_cases_df["pair_key"].astype(str))
-):
-    st.session_state["current_pair_key"] = find_next_open_pair_key(
-        session_case_keys=session_case_keys,
-        open_cases_df=open_cases_df,
-        current_pair_key=None
-    )
+current_pair_key = st.session_state.get("current_pair_key")
+claimed_df = load_claimed_case(selected_run_id, reviewer, current_pair_key)
 
-current_pair_key = st.session_state["current_pair_key"]
-
-if current_pair_key is None:
-    st.success("Dieser Run hat keine offenen Fälle mehr.")
-    load_open_cases.clear()
-    load_open_runs.clear()
-    load_all_cases_for_run.clear()
-    st.stop()
-
-pair_row = open_cases_df[
-    open_cases_df["pair_key"].astype(str) == str(current_pair_key)
-].iloc[0]
+if claimed_df.empty:
+    claimed_row = claim_case(selected_run_id, reviewer, preferred_pair_key=current_pair_key)
+    clear_runtime_caches()
+    if claimed_row is None:
+        st.info("Aktuell ist kein freier Fall verfuegbar. Vielleicht bearbeiten andere Reviewer gerade alle offenen Faelle.")
+        st.stop()
+    current_pair_key = str(claimed_row["pair_key"])
+    st.session_state["current_pair_key"] = current_pair_key
+    if current_pair_key not in st.session_state.get("pair_history", []):
+        st.session_state.setdefault("pair_history", []).append(current_pair_key)
+    pair_row = pd.Series(claimed_row)
+else:
+    pair_row = claimed_df.iloc[0]
+    current_pair_key = str(pair_row["pair_key"])
+    st.session_state["current_pair_key"] = current_pair_key
+    if current_pair_key not in st.session_state.get("pair_history", []):
+        st.session_state.setdefault("pair_history", []).append(current_pair_key)
 
 left_payload = parse_payload(pair_row["left_payload"])
 right_payload = parse_payload(pair_row["right_payload"])
-
 left_title_dynamic = str(pair_row.get("left_source", "Left"))
 right_title_dynamic = str(pair_row.get("right_source", "Right"))
 
 session_pair_number = current_session_position(session_case_keys, current_pair_key)
-session_reviewed_count = session_total - len(open_cases_df)
-
-# Progressbar = aktuelle Position im stabilen Session-Run
+session_reviewed_count = load_reviewed_count(selected_run_id)
 progress_value = session_pair_number / session_total if session_total > 0 else 1.0
+my_locked_count = stats.get("my_locked_count", 0)
+locked_count = stats.get("locked_count", 0)
+open_count = stats.get("open_count", 0)
 
 # =========================================================
 # SIDEBAR STATUS
@@ -763,7 +969,9 @@ progress_value = session_pair_number / session_total if session_total > 0 else 1
 st.sidebar.write(f"Session-Paar {session_pair_number} / {session_total}")
 st.sidebar.progress(progress_value)
 st.sidebar.write(f"Bereits bearbeitet: {session_reviewed_count}")
-st.sidebar.write(f"Noch offen: {len(open_cases_df)}")
+st.sidebar.write(f"Offen gesamt: {open_count}")
+st.sidebar.write(f"Durch andere gesperrt: {max(locked_count - my_locked_count, 0)}")
+st.sidebar.write(f"Meine Sperren: {my_locked_count}")
 st.sidebar.write(f"Run ID: {selected_run_id}")
 
 tolerance_pct = st.sidebar.number_input(
@@ -771,36 +979,30 @@ tolerance_pct = st.sidebar.number_input(
     min_value=0.0,
     value=5.0,
     step=0.5,
-    help="Wenn zwei numerische Werte sich hoechstens um diesen Prozentwert unterscheiden, werden sie gelb markiert."
+    help="Wenn zwei numerische Werte sich hoechstens um diesen Prozentwert unterscheiden, werden sie gelb markiert.",
 )
 
 st.sidebar.markdown("**Farblegende**")
 st.sidebar.markdown(
     """
     <div style="display:flex; gap:8px; align-items:center; margin-bottom:6px;">
-      <div style="width:18px;height:18px;background:#f8d7da;border:1px solid #ccc;"></div><div>Rot = unterschiedlich</div>
+      <div style="width:18px;height:18px;background:#d1e7dd;border:1px solid #ccc;"></div><div>Gruen = exakt gleich</div>
     </div>
     <div style="display:flex; gap:8px; align-items:center; margin-bottom:6px;">
       <div style="width:18px;height:18px;background:#fff3cd;border:1px solid #ccc;"></div><div>Gelb = innerhalb Prozent-Toleranz / Text fast gleich</div>
     </div>
     <div style="display:flex; gap:8px; align-items:center; margin-bottom:6px;">
-      <div style="width:18px;height:18px;background:#d1e7dd;border:1px solid #ccc;"></div><div>Gruen = exakt gleich</div>
-    </div>
-    <div style="display:flex; gap:8px; align-items:center; margin-bottom:6px;">
-      <div style="width:18px;height:18px;background:#f8f9fa;border:1px solid #ccc;"></div><div>Grau = beide leer</div>
+      <div style="width:18px;height:18px;background:#f8d7da;border:1px solid #ccc;"></div><div>Rot = unterschiedlich</div>
     </div>
     """,
-    unsafe_allow_html=True
+    unsafe_allow_html=True,
 )
 
 if mobile_mode:
     st.markdown(f"**Session-Paar {session_pair_number} / {session_total}**")
     st.progress(progress_value)
-    st.caption(f"Bereits bearbeitet: {session_reviewed_count} | Noch offen: {len(open_cases_df)}")
+    st.caption(f"Bereits bearbeitet: {session_reviewed_count} | Offen: {open_count} | Meine Sperren: {my_locked_count}")
 
-# =========================================================
-# TOP INFO + DECISION
-# =========================================================
 score_val = pair_row["score_total"]
 conf_text = "-"
 if pd.notna(score_val):
@@ -808,6 +1010,10 @@ if pd.notna(score_val):
         conf_text = f"{float(score_val):.4f}"
     except Exception:
         conf_text = str(score_val)
+
+lock_info = ""
+if pair_row.get("locked_at") is not None:
+    lock_info = f"<br>Reserviert fuer: {html.escape(str(reviewer))}"
 
 if mobile_mode:
     st.markdown(
@@ -817,41 +1023,30 @@ if mobile_mode:
             <div class="top-score-value">{html.escape(conf_text)}</div>
         </div>
         """,
-        unsafe_allow_html=True
+        unsafe_allow_html=True,
     )
-
     st.markdown(
         f"""
         <div class="compact-note">
             Session-Paar {session_pair_number} / {session_total}<br>
-            {html.escape(left_title_dynamic)} vs {html.escape(right_title_dynamic)}
+            {html.escape(left_title_dynamic)} vs {html.escape(right_title_dynamic)}{lock_info}
         </div>
         """,
-        unsafe_allow_html=True
+        unsafe_allow_html=True,
     )
-
     st.markdown('<div class="review-section-title">Entscheidung</div>', unsafe_allow_html=True)
-
     decision = st.radio(
         "Ist diese Kombination im Blocking sinnvoll?",
         options=DECISION_OPTIONS,
         horizontal=False,
-        format_func=lambda x: {
-            "BLOCK_OK": "Blocking passt",
-            "BLOCK_NOK": "Blocking passt nicht",
-            "UNSURE": "Unklar"
-        }.get(x, x)
+        format_func=lambda x: {"BLOCK_OK": "Blocking passt", "BLOCK_NOK": "Blocking passt nicht", "UNSURE": "Unklar"}.get(x, x),
     )
-
     comment = st.text_area("Kommentar", height=120)
-
     back = st.button("Zurueck", use_container_width=True)
     save_next = st.button("Speichern + Weiter", use_container_width=True)
     skip_next = st.button("Weiter ohne Speichern", use_container_width=True)
-
 else:
     header_left, header_right = st.columns([1.0, 2.2])
-
     with header_left:
         st.markdown(
             f"""
@@ -860,47 +1055,34 @@ else:
                 <div class="top-score-value">{html.escape(conf_text)}</div>
             </div>
             """,
-            unsafe_allow_html=True
+            unsafe_allow_html=True,
         )
-
         st.markdown(
             f"""
             <div class="compact-note">
                 Session-Paar {session_pair_number} / {session_total}<br>
-                {html.escape(left_title_dynamic)} vs {html.escape(right_title_dynamic)}
+                {html.escape(left_title_dynamic)} vs {html.escape(right_title_dynamic)}{lock_info}
             </div>
             """,
-            unsafe_allow_html=True
+            unsafe_allow_html=True,
         )
-
     with header_right:
         st.markdown('<div class="review-section-title">Entscheidung</div>', unsafe_allow_html=True)
-
         decision_left, decision_right = st.columns([1.25, 1.0])
-
         with decision_left:
             decision = st.radio(
                 "Ist diese Kombination im Blocking sinnvoll?",
                 options=DECISION_OPTIONS,
                 horizontal=True,
-                format_func=lambda x: {
-                    "BLOCK_OK": "Blocking passt",
-                    "BLOCK_NOK": "Blocking passt nicht",
-                    "UNSURE": "Unklar"
-                }.get(x, x)
+                format_func=lambda x: {"BLOCK_OK": "Blocking passt", "BLOCK_NOK": "Blocking passt nicht", "UNSURE": "Unklar"}.get(x, x),
             )
-
         with decision_right:
             comment = st.text_area("Kommentar", height=95)
-
         btn1, btn2, btn3 = st.columns([1, 1.5, 1.2])
-
         with btn1:
             back = st.button("Zurueck", use_container_width=True)
-
         with btn2:
             save_next = st.button("Speichern + Weiter", use_container_width=True)
-
         with btn3:
             skip_next = st.button("Weiter ohne Speichern", use_container_width=True)
 
@@ -908,66 +1090,42 @@ else:
 # NAVIGATION ACTIONS
 # =========================================================
 if back:
-    prev_key = find_prev_open_pair_key(
-        session_case_keys=session_case_keys,
-        open_cases_df=open_cases_df,
-        current_pair_key=current_pair_key
-    )
-    if prev_key is not None:
-        st.session_state["current_pair_key"] = prev_key
+    history = st.session_state.get("pair_history", [])
+    if len(history) >= 2:
+        prev_key = history[-2]
+        claimed_prev = claim_case(selected_run_id, reviewer, preferred_pair_key=prev_key)
+        if claimed_prev is not None:
+            st.session_state["current_pair_key"] = str(claimed_prev["pair_key"])
+            st.session_state["pair_history"] = history[:-1]
+    clear_runtime_caches()
     st.rerun()
 
 if save_next:
-    current_key_before_save = current_pair_key
-
-    save_decision(pair_row, decision, comment, reviewer)
-
-    # Lokale offene Menge ableiten statt sofort nochmal DB zu lesen
-    current_open_keys = get_open_keys_from_df(open_cases_df)
-    current_open_keys.discard(str(current_key_before_save))
-
-    if current_open_keys:
-        next_key = None
+    ok, msg = save_decision(pair_row, decision, comment, reviewer)
+    clear_runtime_caches()
+    if ok:
+        next_row = claim_case(selected_run_id, reviewer, exclude_pair_key=current_pair_key)
+        st.session_state["current_pair_key"] = str(next_row["pair_key"]) if next_row else None
+        st.session_state["selected_run_id"] = selected_run_id
+        if next_row:
+            st.session_state.setdefault("pair_history", []).append(str(next_row["pair_key"]))
         try:
-            start_idx = session_case_keys.index(current_key_before_save)
-        except ValueError:
-            start_idx = -1
-
-        for i in range(start_idx + 1, len(session_case_keys)):
-            if session_case_keys[i] in current_open_keys:
-                next_key = session_case_keys[i]
-                break
-
-        if next_key is None:
-            for i in range(0, start_idx + 1):
-                if session_case_keys[i] in current_open_keys:
-                    next_key = session_case_keys[i]
-                    break
+            st.toast(msg)
+        except Exception:
+            pass
+        show_popup_message(msg, duration_ms=900)
     else:
-        next_key = None
-
-    st.session_state["current_pair_key"] = next_key
-
-    # Nur notwendige Caches invalidieren
-    load_open_cases.clear()
-    load_open_runs.clear()
-    load_all_cases_for_run.clear()
-
-    try:
-        st.toast("Gespeichert")
-    except Exception:
-        pass
-    show_popup_message("Gespeichert", duration_ms=900)
+        st.error(msg)
     st.rerun()
 
 if skip_next:
-    next_key = find_next_open_pair_key(
-        session_case_keys=session_case_keys,
-        open_cases_df=open_cases_df,
-        current_pair_key=current_pair_key
-    )
-    if next_key is not None:
-        st.session_state["current_pair_key"] = next_key
+    release_claim(selected_run_id, reviewer, current_pair_key, to_open=True)
+    clear_runtime_caches()
+    next_row = claim_case(selected_run_id, reviewer, exclude_pair_key=current_pair_key)
+    st.session_state["current_pair_key"] = str(next_row["pair_key"]) if next_row else None
+    st.session_state["selected_run_id"] = selected_run_id
+    if next_row:
+        st.session_state.setdefault("pair_history", []).append(str(next_row["pair_key"]))
     st.rerun()
 
 # =========================================================
@@ -978,20 +1136,13 @@ comparison_df = build_combined_display_df(
     right_payload,
     tolerance_pct,
     left_title_dynamic,
-    right_title_dynamic
+    right_title_dynamic,
 )
 
-if mobile_mode:
-    render_mobile_compare_cards(
-        comparison_df,
-        left_title_dynamic,
-        right_title_dynamic
-    )
+if comparison_df.empty:
+    st.info("Keine vergleichbaren Parameter vorhanden.")
+elif mobile_mode:
+    render_mobile_compare_cards(comparison_df, left_title_dynamic, right_title_dynamic)
 else:
-    comparison_html = render_comparison_table_html(
-        comparison_df,
-        left_title_dynamic,
-        right_title_dynamic,
-        mobile_mode=False
-    )
+    comparison_html = render_comparison_table_html(comparison_df, left_title_dynamic, right_title_dynamic, mobile_mode=False)
     st.markdown(comparison_html, unsafe_allow_html=True)

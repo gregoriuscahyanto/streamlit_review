@@ -83,7 +83,6 @@ def apply_css(mobile_mode: bool):
             }
             .top-score-label { font-size:12px; color:#6c757d; margin-bottom:4px; }
             .top-score-value { font-size:24px; font-weight:800; line-height:1.1; margin-bottom:10px; }
-            .top-score-session { font-size:14px; color:#495057; font-weight:600; }
             .compact-note { font-size:13px; color:#6c757d; }
             .reviewer-required-box {
                 border: 1px solid #e0e0e0;
@@ -151,7 +150,6 @@ def apply_css(mobile_mode: bool):
             }
             .top-score-label { font-size:14px; color:#6c757d; margin-bottom:4px; }
             .top-score-value { font-size:34px; font-weight:800; line-height:1.1; margin-bottom:14px; }
-            .top-score-session { font-size:15px; color:#495057; font-weight:600; }
             .compact-note { font-size:13px; color:#6c757d; }
             .reviewer-required-box {
                 border: 1px solid #e0e0e0;
@@ -1050,12 +1048,6 @@ render_sidebar_metric(
     MAX_BACK_HISTORY,
     progress_ratio=(history_total / MAX_BACK_HISTORY) if MAX_BACK_HISTORY > 0 else 0.0,
 )
-render_sidebar_metric(
-    "Reserviert (lokal)",
-    remaining,
-    batch_size_total,
-    progress_ratio=(remaining / batch_size_total) if batch_size_total > 0 else 0.0,
-)
 
 st.sidebar.markdown("---")
 st.sidebar.write(f"Run ID: {selected_run_id}")
@@ -1105,7 +1097,6 @@ if mobile_mode:
         <div class="top-score-card">
             <div class="top-score-label">Confidence Score</div>
             <div class="top-score-value">{html.escape(conf_text)}</div>
-            <div class="top-score-session">Session-Paar {session_pair_number} / {session_total}</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -1140,7 +1131,6 @@ else:
             <div class="top-score-card">
                 <div class="top-score-label">Confidence Score</div>
                 <div class="top-score-value">{html.escape(conf_text)}</div>
-                <div class="top-score-session">Session-Paar {session_pair_number} / {session_total}</div>
             </div>
             """,
             unsafe_allow_html=True,

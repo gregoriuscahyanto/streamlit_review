@@ -71,14 +71,19 @@ def apply_css(mobile_mode: bool):
             }
             .top-score-card {
                 border:1px solid #dfe3e8;
-                border-radius:10px;
-                padding:8px 10px;
+                border-radius:12px;
+                padding:14px 12px;
                 background:#f8f9fa;
                 margin-bottom:10px;
                 text-align:center;
+                min-height:190px;
+                display:flex;
+                flex-direction:column;
+                justify-content:center;
             }
-            .top-score-label { font-size:12px; color:#6c757d; margin-bottom:2px; }
-            .top-score-value { font-size:24px; font-weight:800; line-height:1.1; }
+            .top-score-label { font-size:12px; color:#6c757d; margin-bottom:4px; }
+            .top-score-value { font-size:24px; font-weight:800; line-height:1.1; margin-bottom:10px; }
+            .top-score-session { font-size:14px; color:#495057; font-weight:600; }
             .compact-note { font-size:13px; color:#6c757d; }
             .reviewer-required-box {
                 border: 1px solid #e0e0e0;
@@ -87,6 +92,18 @@ def apply_css(mobile_mode: bool):
                 background: #fafafa;
                 margin-top: 14px;
                 margin-bottom: 12px;
+            }
+            .sidebar-stat-title {
+                font-size: 13px;
+                font-weight: 700;
+                margin-bottom: 4px;
+            }
+            .sidebar-stat-value {
+                font-size: 13px;
+                font-weight: 700;
+                text-align: right;
+                white-space: nowrap;
+                padding-top: 1px;
             }
             </style>
             """,
@@ -122,14 +139,19 @@ def apply_css(mobile_mode: bool):
             }
             .top-score-card {
                 border:1px solid #dfe3e8;
-                border-radius:10px;
-                padding:10px 14px;
+                border-radius:12px;
+                padding:18px 16px;
                 background:#f8f9fa;
                 margin-bottom:10px;
                 text-align:center;
+                min-height:190px;
+                display:flex;
+                flex-direction:column;
+                justify-content:center;
             }
-            .top-score-label { font-size:14px; color:#6c757d; margin-bottom:2px; }
-            .top-score-value { font-size:34px; font-weight:800; line-height:1.1; }
+            .top-score-label { font-size:14px; color:#6c757d; margin-bottom:4px; }
+            .top-score-value { font-size:34px; font-weight:800; line-height:1.1; margin-bottom:14px; }
+            .top-score-session { font-size:15px; color:#495057; font-weight:600; }
             .compact-note { font-size:13px; color:#6c757d; }
             .reviewer-required-box {
                 border: 1px solid #e0e0e0;
@@ -138,6 +160,18 @@ def apply_css(mobile_mode: bool):
                 background: #fafafa;
                 margin-top: 14px;
                 margin-bottom: 14px;
+            }
+            .sidebar-stat-title {
+                font-size: 13px;
+                font-weight: 700;
+                margin-bottom: 4px;
+            }
+            .sidebar-stat-value {
+                font-size: 13px;
+                font-weight: 700;
+                text-align: right;
+                white-space: nowrap;
+                padding-top: 1px;
             }
             </style>
             """,
@@ -286,7 +320,7 @@ def build_combined_display_df(
         "normalized_equal": 1,
         "different": 2,
     }
-    df["_keylvl3_priority"] = df["Parameter"].str.lower().eq("key_lvl3").map({True: 0, False: 1})
+    df["_keylvl3_priority"] = df["Parameter"].str.lower().apply(lambda x: 0 if x == "key_lvl3" else 1)
     df["_sort_rank"] = df["_status"].map(status_rank).fillna(99)
     df = df.sort_values(["_keylvl3_priority", "_sort_rank", "Parameter"], kind="stable").reset_index(drop=True)
     return df
@@ -715,10 +749,8 @@ def prepare_inputs_for_pair(batch_state: dict, pair_key: str):
 
     draft = get_draft(batch_state, pair_key)
 
-    if decision_key not in st.session_state:
-        st.session_state[decision_key] = draft.get("decision", DECISION_OPTIONS[0])
-    if comment_key not in st.session_state:
-        st.session_state[comment_key] = draft.get("comment", "")
+    st.session_state[decision_key] = draft.get("decision", DECISION_OPTIONS[0])
+    st.session_state[comment_key] = draft.get("comment", "")
 
     return decision_key, comment_key
 
@@ -856,6 +888,22 @@ def save_all_drafts_in_batch(run_id: str, reviewer: str, batch_state: dict):
     return saved_count, failed_count
 
 
+def render_sidebar_metric(title: str, left_value, right_value=None, progress_ratio=None):
+    st.sidebar.markdown(f"<div class='sidebar-stat-title'>{html.escape(title)}</div>", unsafe_allow_html=True)
+    left_col, right_col = st.sidebar.columns([4.5, 1.7])
+    with left_col:
+        if progress_ratio is None:
+            progress_ratio = 0.0
+        progress_ratio = max(0.0, min(1.0, float(progress_ratio)))
+        st.progress(progress_ratio)
+    with right_col:
+        if right_value is None:
+            text_value = f"{left_value}"
+        else:
+            text_value = f"{left_value} / {right_value}"
+        st.markdown(f"<div class='sidebar-stat-value'>{html.escape(text_value)}</div>", unsafe_allow_html=True)
+
+
 # =========================================================
 # APP START
 # =========================================================
@@ -884,24 +932,19 @@ if runs_df.empty:
 run_options = runs_df["run_id"].tolist()
 run_label_map = {row["run_id"]: run_label(row) for _, row in runs_df.iterrows()}
 
-if "selected_run_id" not in st.session_state or st.session_state["selected_run_id"] not in run_options:
-    st.session_state["selected_run_id"] = run_options[0]
-
-previous_selected_run = st.session_state.get("selected_run_id")
-selected_run_id = st.sidebar.selectbox(
-    "Review-Run auswählen",
-    options=run_options,
-    index=run_options.index(st.session_state["selected_run_id"]),
-    format_func=lambda x: run_label_map.get(x, x),
-)
-st.session_state["selected_run_id"] = selected_run_id
-
 reviewer_before = st.session_state.get("reviewer_name", "")
 reviewer = st.sidebar.text_input(
     "Reviewer",
     value=reviewer_before,
     key="reviewer_name",
     placeholder="Pflichtfeld",
+)
+
+batch_size = st.sidebar.selectbox(
+    "Batch-Groesse",
+    options=[5, 10, 20, 50],
+    index=[5, 10, 20, 50].index(DEFAULT_BATCH_SIZE),
+    help="Groesserer Batch = schnelleres lokales Weiter/Zurueck, aber mehr initialer DB-Traffic.",
 )
 
 if not reviewer or not reviewer.strip():
@@ -913,12 +956,17 @@ if not reviewer or not reviewer.strip():
 
 reviewer = reviewer.strip()
 
-batch_size = st.sidebar.selectbox(
-    "Batch-Groesse",
-    options=[10, 20, 50],
-    index=[10, 20, 50].index(DEFAULT_BATCH_SIZE),
-    help="Groesserer Batch = schnelleres lokales Weiter/Zurueck, aber mehr initialer DB-Traffic.",
+if "selected_run_id" not in st.session_state or st.session_state["selected_run_id"] not in run_options:
+    st.session_state["selected_run_id"] = run_options[0]
+
+previous_selected_run = st.session_state.get("selected_run_id")
+selected_run_id = st.sidebar.selectbox(
+    "Review-Run auswählen",
+    options=run_options,
+    index=run_options.index(st.session_state["selected_run_id"]),
+    format_func=lambda x: run_label_map.get(x, x),
 )
+st.session_state["selected_run_id"] = selected_run_id
 
 if previous_selected_run != selected_run_id and previous_selected_run in run_options:
     old_batch = get_batch_state(previous_selected_run, reviewer)
@@ -941,11 +989,6 @@ pair_row = batch_state.get("current")
 if pair_row is None:
     st.success("Dieser Run hat aktuell keine frei verfuegbaren Faelle mehr.")
     st.caption("Entweder ist alles bearbeitet oder die restlichen Faelle sind gerade von anderen Reviewern reserviert.")
-    st.sidebar.write(f"Run ID: {selected_run_id}")
-    st.sidebar.write(f"Gesamt: {session_total}")
-    st.sidebar.write(f"Offen: {int(run_stats.get('open_count', 0) or 0)}")
-    st.sidebar.write(f"Reserviert: {int(run_stats.get('locked_count', 0) or 0)}")
-    st.sidebar.write(f"Bearbeitet: {int(run_stats.get('reviewed_count', 0) or 0)}")
     st.stop()
 
 current_pair_key = str(pair_row["pair_key"])
@@ -961,14 +1004,38 @@ progress_value = session_pair_number / session_total if session_total > 0 else 1
 # =========================================================
 # SIDEBAR STATUS
 # =========================================================
-st.sidebar.write(f"Session-Paar {session_pair_number} / {session_total}")
-st.sidebar.progress(progress_value)
-st.sidebar.write(f"Bereits bearbeitet: {int(run_stats.get('reviewed_count', 0) or 0)}")
-st.sidebar.write(f"Noch offen: {int(run_stats.get('open_count', 0) or 0)}")
-st.sidebar.write(f"Reserviert: {int(run_stats.get('locked_count', 0) or 0)}")
-st.sidebar.write(f"Lokaler Batch offen: {1 + len(batch_state.get('queue', []))}")
-st.sidebar.write(f"Zurueck-History: {len(batch_state.get('history', []))} / {MAX_BACK_HISTORY}")
-st.sidebar.write(f"Lokale Drafts: {len(batch_state.get('drafts', {}))}")
+reviewed_total = int(run_stats.get("reviewed_count", 0) or 0)
+open_total = int(run_stats.get("open_count", 0) or 0)
+draft_total = len(batch_state.get("drafts", {}))
+batch_total = 1 + len(batch_state.get("queue", []))
+history_total = len(batch_state.get("history", []))
+
+render_sidebar_metric(
+    "Bereits bearbeitet insgesamt / Noch offen insgesamt",
+    reviewed_total,
+    open_total,
+    progress_ratio=(reviewed_total / (reviewed_total + open_total)) if (reviewed_total + open_total) > 0 else 0.0,
+)
+render_sidebar_metric(
+    "Lokale Drafts / Lokaler Batch",
+    draft_total,
+    batch_total,
+    progress_ratio=(draft_total / batch_total) if batch_total > 0 else 0.0,
+)
+render_sidebar_metric(
+    "Zurueck History",
+    history_total,
+    MAX_BACK_HISTORY,
+    progress_ratio=(history_total / MAX_BACK_HISTORY) if MAX_BACK_HISTORY > 0 else 0.0,
+)
+render_sidebar_metric(
+    "Reserviert",
+    batch_total,
+    batch_size,
+    progress_ratio=(batch_total / batch_size) if batch_size > 0 else 0.0,
+)
+
+st.sidebar.markdown("---")
 st.sidebar.write(f"Run ID: {selected_run_id}")
 
 tolerance_pct = st.sidebar.number_input(
@@ -998,9 +1065,6 @@ st.sidebar.markdown(
 if mobile_mode:
     st.markdown(f"**Session-Paar {session_pair_number} / {session_total}**")
     st.progress(progress_value)
-    st.caption(
-        f"Bearbeitet: {int(run_stats.get('reviewed_count', 0) or 0)} | Offen: {int(run_stats.get('open_count', 0) or 0)} | Batch: {1 + len(batch_state.get('queue', []))}"
-    )
 
 # =========================================================
 # TOP INFO + DECISION
@@ -1019,15 +1083,7 @@ if mobile_mode:
         <div class="top-score-card">
             <div class="top-score-label">Confidence Score</div>
             <div class="top-score-value">{html.escape(conf_text)}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        f"""
-        <div class="compact-note">
-            Session-Paar {session_pair_number} / {session_total}<br>
-            {html.escape(left_title_dynamic)} vs {html.escape(right_title_dynamic)}
+            <div class="top-score-session">Session-Paar {session_pair_number} / {session_total}</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -1055,21 +1111,14 @@ if mobile_mode:
         save_batch_btn = st.form_submit_button("Batch speichern & neuen Batch holen", use_container_width=True)
 else:
     header_left, header_right = st.columns([1.0, 2.2])
+
     with header_left:
         st.markdown(
             f"""
             <div class="top-score-card">
                 <div class="top-score-label">Confidence Score</div>
                 <div class="top-score-value">{html.escape(conf_text)}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-        st.markdown(
-            f"""
-            <div class="compact-note">
-                Session-Paar {session_pair_number} / {session_total}<br>
-                {html.escape(left_title_dynamic)} vs {html.escape(right_title_dynamic)}
+                <div class="top-score-session">Session-Paar {session_pair_number} / {session_total}</div>
             </div>
             """,
             unsafe_allow_html=True,

@@ -749,8 +749,11 @@ def prepare_inputs_for_pair(batch_state: dict, pair_key: str):
 
     draft = get_draft(batch_state, pair_key)
 
-    st.session_state[decision_key] = draft.get("decision", DECISION_OPTIONS[0])
-    st.session_state[comment_key] = draft.get("comment", "")
+    if decision_key not in st.session_state:
+        st.session_state[decision_key] = draft.get("decision", DECISION_OPTIONS[0])
+
+    if comment_key not in st.session_state:
+        st.session_state[comment_key] = draft.get("comment", "")
 
     return decision_key, comment_key
 
@@ -956,9 +959,15 @@ if not reviewer or not reviewer.strip():
 
 reviewer = reviewer.strip()
 
+previous_selected_run = st.session_state.get("selected_run_id")
+
 selected_run_id = st.sidebar.selectbox(
     "Review-Run auswählen",
     options=["-- bitte wählen --"] + run_options,
+    index=0 if "selected_run_id" not in st.session_state else (
+        run_options.index(st.session_state["selected_run_id"]) + 1
+        if st.session_state["selected_run_id"] in run_options else 0
+    ),
     format_func=lambda x: run_label_map.get(x, x) if x != "-- bitte wählen --" else x,
 )
 
@@ -966,22 +975,11 @@ if selected_run_id == "-- bitte wählen --":
     st.warning("Bitte Review-Run auswählen")
     st.stop()
 
-previous_selected_run = st.session_state.get("selected_run_id")
-selected_run_id = st.sidebar.selectbox(
-    "Review-Run auswählen",
-    options=run_options,
-    index=run_options.index(st.session_state["selected_run_id"]),
-    format_func=lambda x: run_label_map.get(x, x),
-)
 st.session_state["selected_run_id"] = selected_run_id
 
 # =========================================================
 # INITIAL USER SELECTION GATE
 # =========================================================
-
-if not reviewer or not reviewer.strip():
-    st.warning("Bitte Reviewer eingeben")
-    st.stop()
 
 if selected_run_id is None:
     st.warning("Bitte Review-Run auswählen")
@@ -1053,10 +1051,10 @@ render_sidebar_metric(
     progress_ratio=(history_total / MAX_BACK_HISTORY) if MAX_BACK_HISTORY > 0 else 0.0,
 )
 render_sidebar_metric(
-    "Reserviert",
-    batch_total,
-    batch_size,
-    progress_ratio=(batch_total / batch_size) if batch_size > 0 else 0.0,
+    "Reserviert (lokal)",
+    remaining,
+    batch_size_total,
+    progress_ratio=(remaining / batch_size_total) if batch_size_total > 0 else 0.0,
 )
 
 st.sidebar.markdown("---")

@@ -1002,6 +1002,16 @@ run_stats = fetch_run_stats(selected_run_id, reviewer)
 batch_state = initialize_batch_for_run(selected_run_id, reviewer, int(batch_size))
 pair_row = batch_state.get("current")
 
+toast_key = f"batch_loaded_toast::{selected_run_id}::{reviewer}"
+current_batch_signature = tuple(current_pair_keys_in_batch(batch_state))
+
+if st.session_state.get(toast_key) != current_batch_signature and current_batch_signature:
+    try:
+        st.toast(f"Batch geladen: {len(current_batch_signature)} Fälle")
+    except Exception:
+        pass
+    st.session_state[toast_key] = current_batch_signature
+
 if pair_row is None:
     st.success("Dieser Run hat aktuell keine frei verfuegbaren Faelle mehr.")
     st.caption("Entweder ist alles bearbeitet oder die restlichen Faelle sind gerade von anderen Reviewern reserviert.")
@@ -1186,12 +1196,25 @@ if back:
         st.rerun()
 
 if next_local:
-    move_to_next_local(selected_run_id, reviewer, batch_state, keep_current_in_history=True)
+    # Aktuellen Eintrag vor Navigation sicher als Draft speichern
+    save_draft(
+        batch_state=batch_state,
+        pair_key=current_pair_key,
+        decision=st.session_state.get(decision_key, DECISION_OPTIONS[0]),
+        comment=st.session_state.get(comment_key, ""),
+    )
 
-    # Wenn Batch fertig ist: automatisch speichern und neuen Batch holen
-    if batch_state.get("current") is None:
+    # Prüfen: Bin ich gerade auf dem letzten Eintrag des aktuellen Batches?
+    is_last_item_in_batch = batch_state.get("current") is not None and len(batch_state.get("queue", [])) == 0
+
+    if is_last_item_in_batch:
+        # Letzten Fall noch in die History schieben
+        move_to_next_local(selected_run_id, reviewer, batch_state, keep_current_in_history=True)
+
+        # Jetzt kompletten Batch speichern
         saved_count, failed_count = save_all_drafts_in_batch(selected_run_id, reviewer, batch_state)
 
+        # Alte Locks freigeben und neuen Batch holen
         release_all_batch_locks(selected_run_id, reviewer, batch_state)
         refill_batch_if_needed(selected_run_id, reviewer, batch_state)
 
@@ -1200,18 +1223,30 @@ if next_local:
             next_pair_key = str(next_pair["pair_key"])
             next_decision_key = f"decision_{next_pair_key}"
             next_comment_key = f"comment_{next_pair_key}"
+
             st.session_state[next_decision_key] = DECISION_OPTIONS[0]
             st.session_state[next_comment_key] = ""
 
-        if failed_count == 0:
             try:
-                st.toast(f"Batch automatisch gespeichert: {saved_count} Fälle")
+                if failed_count == 0:
+                    st.toast(f"Batch automatisch gespeichert und neuer Batch geladen: {saved_count} Fälle")
+                else:
+                    st.toast(f"Neuer Batch geladen. Gespeichert: {saved_count}, Fehler: {failed_count}")
             except Exception:
                 pass
         else:
-            st.warning(f"Batch automatisch gespeichert: {saved_count} gespeichert, {failed_count} fehlgeschlagen.")
+            try:
+                if failed_count == 0:
+                    st.toast(f"Letzter Batch automatisch gespeichert: {saved_count} Fälle")
+                else:
+                    st.toast(f"Letzter Batch verarbeitet. Gespeichert: {saved_count}, Fehler: {failed_count}")
+            except Exception:
+                pass
 
         st.rerun()
+
+    # Normaler lokaler Weiter-Klick innerhalb des Batches
+    move_to_next_local(selected_run_id, reviewer, batch_state, keep_current_in_history=True)
 
     new_current = batch_state.get("current")
     if new_current is not None:
@@ -1225,11 +1260,19 @@ if next_local:
     st.rerun()
 
 if save_batch_btn:
+    # aktuellen Eintrag vor Batch-Save sichern
+    save_draft(
+        batch_state=batch_state,
+        pair_key=current_pair_key,
+        decision=st.session_state.get(decision_key, DECISION_OPTIONS[0]),
+        comment=st.session_state.get(comment_key, ""),
+    )
+
     saved_count, failed_count = save_all_drafts_in_batch(selected_run_id, reviewer, batch_state)
 
     release_all_batch_locks(selected_run_id, reviewer, batch_state)
-
     refill_batch_if_needed(selected_run_id, reviewer, batch_state)
+
     next_pair = batch_state.get("current")
     if next_pair is not None:
         next_pair_key = str(next_pair["pair_key"])
@@ -1238,13 +1281,21 @@ if save_batch_btn:
         st.session_state[next_decision_key] = DECISION_OPTIONS[0]
         st.session_state[next_comment_key] = ""
 
-    if failed_count == 0:
         try:
-            st.toast(f"{saved_count} Faelle gespeichert")
+            if failed_count == 0:
+                st.toast(f"Batch gespeichert und neuer Batch geladen: {saved_count} Fälle")
+            else:
+                st.toast(f"Neuer Batch geladen. Gespeichert: {saved_count}, Fehler: {failed_count}")
         except Exception:
             pass
     else:
-        st.warning(f"{saved_count} gespeichert, {failed_count} konnten nicht gespeichert werden.")
+        if failed_count == 0:
+            try:
+                st.toast(f"{saved_count} Fälle gespeichert")
+            except Exception:
+                pass
+        else:
+            st.warning(f"{saved_count} gespeichert, {failed_count} konnten nicht gespeichert werden.")
 
     st.rerun()
 

@@ -956,8 +956,15 @@ if not reviewer or not reviewer.strip():
 
 reviewer = reviewer.strip()
 
-if "selected_run_id" not in st.session_state or st.session_state["selected_run_id"] not in run_options:
-    st.session_state["selected_run_id"] = run_options[0]
+selected_run_id = st.sidebar.selectbox(
+    "Review-Run auswählen",
+    options=["-- bitte wählen --"] + run_options,
+    format_func=lambda x: run_label_map.get(x, x) if x != "-- bitte wählen --" else x,
+)
+
+if selected_run_id == "-- bitte wählen --":
+    st.warning("Bitte Review-Run auswählen")
+    st.stop()
 
 previous_selected_run = st.session_state.get("selected_run_id")
 selected_run_id = st.sidebar.selectbox(
@@ -967,6 +974,22 @@ selected_run_id = st.sidebar.selectbox(
     format_func=lambda x: run_label_map.get(x, x),
 )
 st.session_state["selected_run_id"] = selected_run_id
+
+# =========================================================
+# INITIAL USER SELECTION GATE
+# =========================================================
+
+if not reviewer or not reviewer.strip():
+    st.warning("Bitte Reviewer eingeben")
+    st.stop()
+
+if selected_run_id is None:
+    st.warning("Bitte Review-Run auswählen")
+    st.stop()
+
+if not batch_size:
+    st.warning("Bitte Batch-Größe wählen")
+    st.stop()
 
 if previous_selected_run != selected_run_id and previous_selected_run in run_options:
     old_batch = get_batch_state(previous_selected_run, reviewer)
@@ -1007,7 +1030,8 @@ progress_value = session_pair_number / session_total if session_total > 0 else 1
 reviewed_total = int(run_stats.get("reviewed_count", 0) or 0)
 open_total = int(run_stats.get("open_count", 0) or 0)
 draft_total = len(batch_state.get("drafts", {}))
-batch_total = 1 + len(batch_state.get("queue", []))
+remaining = 1 + len(batch_state.get("queue", []))
+batch_size_total = batch_state.get("batch_size", DEFAULT_BATCH_SIZE)
 history_total = len(batch_state.get("history", []))
 
 render_sidebar_metric(
@@ -1017,10 +1041,10 @@ render_sidebar_metric(
     progress_ratio=(reviewed_total / (reviewed_total + open_total)) if (reviewed_total + open_total) > 0 else 0.0,
 )
 render_sidebar_metric(
-    "Lokale Drafts / Lokaler Batch",
-    draft_total,
-    batch_total,
-    progress_ratio=(draft_total / batch_total) if batch_total > 0 else 0.0,
+    "Lokaler Batch",
+    remaining,
+    batch_size_total,
+    progress_ratio=remaining / batch_size_total if batch_size_total > 0 else 0
 )
 render_sidebar_metric(
     "Zurueck History",

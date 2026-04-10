@@ -1003,8 +1003,17 @@ batch_state = initialize_batch_for_run(selected_run_id, reviewer, int(batch_size
 pair_row = batch_state.get("current")
 
 toast_key = f"batch_loaded_toast::{selected_run_id}::{reviewer}"
-current_batch_signature = tuple(current_pair_keys_in_batch(batch_state))
 
+def get_batch_signature(batch_state):
+    keys = []
+    current = batch_state.get("current")
+    if current:
+        keys.append(current["pair_key"])
+    for row in batch_state.get("queue", []):
+        keys.append(row["pair_key"])
+    return tuple(keys)
+
+current_batch_signature = get_batch_signature(batch_state)
 if st.session_state.get(toast_key) != current_batch_signature and current_batch_signature:
     try:
         st.toast(f"Batch geladen: {len(current_batch_signature)} Fälle")

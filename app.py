@@ -814,11 +814,8 @@ def move_to_next_local(run_id: str, reviewer: str, batch_state: dict, keep_curre
 
     if batch_state.get("queue"):
         batch_state["current"] = batch_state["queue"].pop(0)
-        return
-
-    claimed = claim_case_batch(run_id, reviewer, batch_state.get("batch_size", DEFAULT_BATCH_SIZE))
-    batch_state["queue"] = claimed
-    batch_state["current"] = batch_state["queue"].pop(0) if batch_state["queue"] else None
+    else:
+        batch_state["current"] = None
 
 
 def move_back_local(batch_state: dict):
@@ -1190,6 +1187,32 @@ if back:
 
 if next_local:
     move_to_next_local(selected_run_id, reviewer, batch_state, keep_current_in_history=True)
+
+    # Wenn Batch fertig ist: automatisch speichern und neuen Batch holen
+    if batch_state.get("current") is None:
+        saved_count, failed_count = save_all_drafts_in_batch(selected_run_id, reviewer, batch_state)
+
+        release_all_batch_locks(selected_run_id, reviewer, batch_state)
+        refill_batch_if_needed(selected_run_id, reviewer, batch_state)
+
+        next_pair = batch_state.get("current")
+        if next_pair is not None:
+            next_pair_key = str(next_pair["pair_key"])
+            next_decision_key = f"decision_{next_pair_key}"
+            next_comment_key = f"comment_{next_pair_key}"
+            st.session_state[next_decision_key] = DECISION_OPTIONS[0]
+            st.session_state[next_comment_key] = ""
+
+        if failed_count == 0:
+            try:
+                st.toast(f"Batch automatisch gespeichert: {saved_count} Fälle")
+            except Exception:
+                pass
+        else:
+            st.warning(f"Batch automatisch gespeichert: {saved_count} gespeichert, {failed_count} fehlgeschlagen.")
+
+        st.rerun()
+
     new_current = batch_state.get("current")
     if new_current is not None:
         new_pair_key = str(new_current["pair_key"])
@@ -1198,6 +1221,7 @@ if next_local:
         draft = get_draft(batch_state, new_pair_key)
         st.session_state[new_decision_key] = draft.get("decision", DECISION_OPTIONS[0])
         st.session_state[new_comment_key] = draft.get("comment", "")
+
     st.rerun()
 
 if save_batch_btn:

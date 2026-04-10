@@ -160,8 +160,7 @@ def ensure_lock_columns():
     return missing
 
 
-@st.cache_data(ttl=10)
-def load_open_runs() -> pd.DataFrame:
+def load_open_runs_db() -> pd.DataFrame:
     query = text(
         """
         select
@@ -194,8 +193,7 @@ def load_open_runs() -> pd.DataFrame:
         return pd.read_sql(query, conn)
 
 
-@st.cache_data(ttl=5)
-def load_run_stats(run_id: str, reviewer: str) -> dict:
+def load_run_stats_db(run_id: str, reviewer: str) -> dict:
     query = text(
         """
         select
@@ -213,8 +211,7 @@ def load_run_stats(run_id: str, reviewer: str) -> dict:
         return dict(row)
 
 
-@st.cache_data(ttl=5)
-def load_reviewed_count(run_id: str) -> int:
+def load_reviewed_count_db(run_id: str) -> int:
     query = text(
         """
         select count(*)
@@ -228,10 +225,55 @@ def load_reviewed_count(run_id: str) -> int:
 
 
 def clear_runtime_caches():
-    load_open_runs.clear()
-    load_run_stats.clear()
-    load_reviewed_count.clear()
+    st.session_state.pop("runs_df_cache", None)
+    st.session_state.pop("runs_df_cache_ts", None)
+    st.session_state.pop("run_stats_cache", None)
+    st.session_state.pop("reviewed_count_cache", None)
 
+
+
+
+def get_runs_df(force_refresh: bool = False) -> pd.DataFrame:
+    now_ts = datetime.utcnow().timestamp()
+    cached_df = st.session_state.get("runs_df_cache")
+    cached_ts = st.session_state.get("runs_df_cache_ts", 0.0)
+    if (not force_refresh) and cached_df is not None and (now_ts - cached_ts) < 10:
+        return cached_df
+    df = load_open_runs_db()
+    st.session_state["runs_df_cache"] = df
+    st.session_state["runs_df_cache_ts"] = now_ts
+    return df
+
+
+def get_run_stats(run_id: str, reviewer: str, force_refresh: bool = False) -> dict:
+    now_ts = datetime.utcnow().timestamp()
+    cache = st.session_state.get("run_stats_cache", {})
+    cache_key = f"{run_id}|{reviewer}"
+    if (not force_refresh) and cache_key in cache and (now_ts - cache[cache_key]["ts"]) < 5:
+        return cache[cache_key]["value"]
+    value = load_run_stats_db(run_id, reviewer)
+    cache[cache_key] = {"ts": now_ts, "value": value}
+    st.session_state["run_stats_cache"] = cache
+    return value
+
+
+def get_reviewed_count(run_id: str, force_refresh: bool = False) -> int:
+    now_ts = datetime.utcnow().timestamp()
+    cache = st.session_state.get("reviewed_count_cache", {})
+    if (not force_refresh) and run_id in cache and (now_ts - cache[run_id]["ts"]) < 5:
+        return cache[run_id]["value"]
+    value = load_reviewed_count_db(run_id)
+    cache[run_id] = {"ts": now_ts, "value": value}
+    st.session_state["reviewed_count_cache"] = cache
+    return value
+
+
+def maybe_cleanup_stale_claims(run_id: str | None = None, force: bool = False):
+    now_ts = datetime.utcnow().timestamp()
+    last_ts = st.session_state.get("last_stale_cleanup_ts", 0.0)
+    if force or (now_ts - last_ts) > 60:
+        cleanup_stale_claims(run_id)
+        st.session_state["last_stale_cleanup_ts"] = now_ts
 
 def cleanup_stale_claims(run_id: str | None = None):
     where_run = "and run_id = :run_id" if run_id else ""
@@ -831,8 +873,8 @@ mobile_mode = st.sidebar.toggle("Mobile-Modus", value=False)
 apply_css(mobile_mode)
 st.markdown('<div class="app-main-title">Blocking Review</div>', unsafe_allow_html=True)
 
-cleanup_stale_claims()
-runs_df = load_open_runs()
+maybe_cleanup_stale_claims(force=True)
+runs_df = get_runs_df()
 
 if len(runs_df) == 0:
     st.success("Keine offenen Runs vorhanden.")
@@ -869,7 +911,7 @@ init_batch_state(selected_run_id, reviewer, force_reset=force_reset_run)
 ensure_batch_loaded(selected_run_id, reviewer, force_reload=force_reset_run)
 
 pair_row = get_current_pair_row()
-stats = load_run_stats(selected_run_id, reviewer)
+stats = get_run_stats(selected_run_id, reviewer)
 
 if pair_row is None:
     if (stats.get("open_count", 0) + stats.get("my_locked_count", 0)) == 0:
@@ -888,7 +930,7 @@ right_title_dynamic = str(pair_row.get("right_source", "Right"))
 batch_keys = st.session_state.get("batch_keys", [])
 session_pair_number = current_batch_position()
 session_total = len(batch_keys)
-session_reviewed_count = load_reviewed_count(selected_run_id)
+session_reviewed_count = get_reviewed_count(selected_run_id)
 progress_value = session_pair_number / session_total if session_total > 0 else 1.0
 my_locked_count = stats.get("my_locked_count", 0)
 locked_count = stats.get("locked_count", 0)
@@ -968,18 +1010,23 @@ if mobile_mode:
         """,
         unsafe_allow_html=True,
     )
-    st.markdown('<div class="review-section-title">Entscheidung</div>', unsafe_allow_html=True)
-    decision = st.radio(
-        "Ist diese Kombination im Blocking sinnvoll?",
-        options=DECISION_OPTIONS,
-        horizontal=False,
-        index=DECISION_OPTIONS.index(current_decision),
-        format_func=lambda x: {"BLOCK_OK": "Blocking passt", "BLOCK_NOK": "Blocking passt nicht", "UNSURE": "Unklar"}.get(x, x),
-    )
-    comment = st.text_area("Kommentar", value=current_comment, height=120)
-    back = st.button("Zurueck", use_container_width=True)
-    next_only = st.button("Weiter", use_container_width=True)
-    save_next = st.button("Speichern und Weiter", use_container_width=True)
+    with st.form(key=f"decision_form_{current_pair_key}", clear_on_submit=False):
+        st.markdown('<div class="review-section-title">Entscheidung</div>', unsafe_allow_html=True)
+        decision = st.radio(
+            "Ist diese Kombination im Blocking sinnvoll?",
+            options=DECISION_OPTIONS,
+            horizontal=False,
+            index=DECISION_OPTIONS.index(current_decision),
+            format_func=lambda x: {"BLOCK_OK": "Blocking passt", "BLOCK_NOK": "Blocking passt nicht", "UNSURE": "Unklar"}.get(x, x),
+        )
+        comment = st.text_area("Kommentar", value=current_comment, height=120)
+        btn1, btn2, btn3 = st.columns(3)
+        with btn1:
+            back = st.form_submit_button("Zurueck", use_container_width=True)
+        with btn2:
+            next_only = st.form_submit_button("Weiter", use_container_width=True)
+        with btn3:
+            save_next = st.form_submit_button("Speichern und Weiter", use_container_width=True)
 else:
     header_left, header_right = st.columns([1.0, 2.2])
     with header_left:
@@ -1002,25 +1049,26 @@ else:
             unsafe_allow_html=True,
         )
     with header_right:
-        st.markdown('<div class="review-section-title">Entscheidung</div>', unsafe_allow_html=True)
-        decision_left, decision_right = st.columns([1.25, 1.0])
-        with decision_left:
-            decision = st.radio(
-                "Ist diese Kombination im Blocking sinnvoll?",
-                options=DECISION_OPTIONS,
-                horizontal=True,
-                index=DECISION_OPTIONS.index(current_decision),
-                format_func=lambda x: {"BLOCK_OK": "Blocking passt", "BLOCK_NOK": "Blocking passt nicht", "UNSURE": "Unklar"}.get(x, x),
-            )
-        with decision_right:
-            comment = st.text_area("Kommentar", value=current_comment, height=95)
-        btn1, btn2, btn3 = st.columns([1, 1, 1.4])
-        with btn1:
-            back = st.button("Zurueck", use_container_width=True)
-        with btn2:
-            next_only = st.button("Weiter", use_container_width=True)
-        with btn3:
-            save_next = st.button("Speichern und Weiter", use_container_width=True)
+        with st.form(key=f"decision_form_{current_pair_key}", clear_on_submit=False):
+            st.markdown('<div class="review-section-title">Entscheidung</div>', unsafe_allow_html=True)
+            decision_left, decision_right = st.columns([1.25, 1.0])
+            with decision_left:
+                decision = st.radio(
+                    "Ist diese Kombination im Blocking sinnvoll?",
+                    options=DECISION_OPTIONS,
+                    horizontal=True,
+                    index=DECISION_OPTIONS.index(current_decision),
+                    format_func=lambda x: {"BLOCK_OK": "Blocking passt", "BLOCK_NOK": "Blocking passt nicht", "UNSURE": "Unklar"}.get(x, x),
+                )
+            with decision_right:
+                comment = st.text_area("Kommentar", value=current_comment, height=95)
+            btn1, btn2, btn3 = st.columns([1, 1, 1.4])
+            with btn1:
+                back = st.form_submit_button("Zurueck", use_container_width=True)
+            with btn2:
+                next_only = st.form_submit_button("Weiter", use_container_width=True)
+            with btn3:
+                save_next = st.form_submit_button("Speichern und Weiter", use_container_width=True)
 
 st.session_state.setdefault("decision_map", {})[current_pair_key] = decision
 st.session_state.setdefault("comment_map", {})[current_pair_key] = comment

@@ -722,6 +722,8 @@ def get_batch_state(run_id: str, reviewer: str) -> dict:
             "history": [],
             "batch_size": DEFAULT_BATCH_SIZE,
             "drafts": {},
+            "rows_by_pair_key": {},
+            "claimed_pair_keys": [],
         }
     return st.session_state[key]
 
@@ -785,15 +787,24 @@ def pop_history(batch_state: dict):
 
 
 def current_pair_keys_in_batch(batch_state: dict) -> list[str]:
-    keys = []
-    current = batch_state.get("current")
-    if current is not None:
-        keys.append(str(current["pair_key"]))
-    for row in batch_state.get("queue", []):
-        keys.append(str(row["pair_key"]))
-    for row in batch_state.get("history", []):
-        keys.append(str(row["pair_key"]))
-    return list(dict.fromkeys(keys))
+    return list(batch_state.get("claimed_pair_keys", []))
+
+
+def hydrate_batch_state_from_claimed_rows(batch_state: dict, claimed_rows: list[dict]):
+    rows_by_pair_key = {}
+    claimed_pair_keys = []
+
+    for row in claimed_rows:
+        pair_key = str(row["pair_key"])
+        rows_by_pair_key[pair_key] = row
+        claimed_pair_keys.append(pair_key)
+
+    batch_state["rows_by_pair_key"] = rows_by_pair_key
+    batch_state["claimed_pair_keys"] = claimed_pair_keys
+    batch_state["queue"] = claimed_rows.copy()
+    batch_state["current"] = batch_state["queue"].pop(0) if batch_state["queue"] else None
+    batch_state["history"] = []
+    batch_state["drafts"] = {}
 
 
 def refill_batch_if_needed(run_id: str, reviewer: str, batch_state: dict):
@@ -802,9 +813,9 @@ def refill_batch_if_needed(run_id: str, reviewer: str, batch_state: dict):
         current_count += 1
     if current_count > 0:
         return
+
     claimed = claim_case_batch(run_id, reviewer, batch_state.get("batch_size", DEFAULT_BATCH_SIZE))
-    batch_state["queue"] = claimed
-    batch_state["current"] = batch_state["queue"].pop(0) if batch_state["queue"] else None
+    hydrate_batch_state_from_claimed_rows(batch_state, claimed)
 
 
 def move_to_next_local(run_id: str, reviewer: str, batch_state: dict, keep_current_in_history: bool = True):
@@ -837,6 +848,8 @@ def release_all_batch_locks(run_id: str, reviewer: str, batch_state: dict):
     batch_state["current"] = None
     batch_state["history"] = []
     batch_state["drafts"] = {}
+    batch_state["rows_by_pair_key"] = {}
+    batch_state["claimed_pair_keys"] = []
 
 
 def initialize_batch_for_run(run_id: str, reviewer: str, batch_size: int):
@@ -856,18 +869,18 @@ def save_all_drafts_in_batch(run_id: str, reviewer: str, batch_state: dict):
 
     saved_count = 0
     failed_count = 0
+    rows_by_pair_key = dict(batch_state.get("rows_by_pair_key", {}))
 
-    row_map = {}
-    for row in batch_state.get("history", []):
-        row_map[str(row["pair_key"])] = row
-    for row in batch_state.get("queue", []):
-        row_map[str(row["pair_key"])] = row
-    current = batch_state.get("current")
-    if current is not None:
-        row_map[str(current["pair_key"])] = current
+    # Safety net: Falls Drafts fehlen (z. B. letzter Eintrag), aus claimed rows die Defaults nehmen.
+    for pair_key in batch_state.get("claimed_pair_keys", []):
+        if pair_key not in drafts:
+            drafts[pair_key] = {
+                "decision": DECISION_OPTIONS[0],
+                "comment": "",
+            }
 
     for pair_key, draft in drafts.items():
-        pair_row = row_map.get(str(pair_key))
+        pair_row = rows_by_pair_key.get(str(pair_key))
         if pair_row is None:
             failed_count += 1
             continue
@@ -1067,6 +1080,9 @@ render_sidebar_metric(
 
 st.sidebar.markdown("---")
 st.sidebar.write(f"Run ID: {selected_run_id}")
+
+st.sidebar.markdown(f"Lokale Drafts im Batch: **{draft_total}**")
+st.sidebar.markdown(f"Komplette Batch-Faelle reserviert: **{len(batch_state.get('claimed_pair_keys', []))}**")
 
 tolerance_pct = st.sidebar.number_input(
     "Toleranz in Prozent",

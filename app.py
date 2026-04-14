@@ -1258,15 +1258,14 @@ render_sidebar_metric(
 remaining_seconds, ratio_left, expires_at = get_batch_time_left(batch_state)
 
 if remaining_seconds is not None:
-    remaining_minutes = max(0, remaining_seconds // 60)
-    remaining_text = f"noch {remaining_minutes} min"
+    left_text = f"{max(0, remaining_seconds // 60)}"
 else:
-    remaining_text = "-"
+    left_text = "-"
 
 render_sidebar_metric(
     "Zeitlimit Batch",
-    remaining_text,
-    expires_at.strftime("%H:%M Uhr") if expires_at is not None else "-",
+    left_text,
+    expires_at.strftime("%H:%M") if expires_at is not None else "-",
     progress_ratio=ratio_left if ratio_left is not None else 0.0,
 )
 

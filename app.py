@@ -8,9 +8,15 @@ import pandas as pd
 import streamlit as st
 from sqlalchemy import create_engine, text
 
+try:
+    from streamlit_autorefresh import st_autorefresh
+except Exception:
+    st_autorefresh = None
+
 st.set_page_config(page_title="Blocking Review", layout="wide")
 
 DECISION_OPTIONS = ["BLOCK_OK", "BLOCK_NOK", "UNSURE"]
+DEFAULT_DECISION = "UNSURE"
 CLAIM_TIMEOUT_MINUTES = 30
 REQUIRED_LOCK_COLUMNS = {"locked_by", "locked_at"}
 DEFAULT_BATCH_SIZE = 10
@@ -802,7 +808,7 @@ def prepare_inputs_for_pair(batch_state: dict, pair_key: str):
     draft = get_draft(batch_state, pair_key)
 
     if decision_key not in st.session_state:
-        st.session_state[decision_key] = draft.get("decision", DECISION_OPTIONS[0])
+        st.session_state[decision_key] = draft.get("decision", DEFAULT_DECISION)
 
     if comment_key not in st.session_state:
         st.session_state[comment_key] = draft.get("comment", "")
@@ -943,7 +949,7 @@ def save_all_drafts_in_batch(run_id: str, reviewer: str, batch_state: dict):
         draft = drafts.get(pair_key, {})
         ok = save_case_decision(
             pair_row=pair_row,
-            decision=draft.get("decision", DECISION_OPTIONS[0]),
+            decision=draft.get("decision", DEFAULT_DECISION),
             comment=draft.get("comment", ""),
             reviewer=reviewer,
         )
@@ -1189,7 +1195,10 @@ pair_row = batch_state.get("current")
 
 if has_active_batch(batch_state):
     try:
-        st.autorefresh(interval=1000, key=f"batch_timer_refresh::{reviewer}")
+        if hasattr(st, "autorefresh"):
+            st.autorefresh(interval=1000, key=f"batch_timer_refresh::{reviewer}")
+        elif st_autorefresh is not None:
+            st_autorefresh(interval=1000, key=f"batch_timer_refresh::{reviewer}")
     except Exception:
         pass
 
@@ -1253,8 +1262,6 @@ with st.sidebar:
 st.sidebar.markdown("---")
 st.sidebar.markdown(f"Aktueller Review-Run: **{run_label_map.get(selected_run_id, selected_run_id)}**")
 st.sidebar.markdown(f"Noch offen insgesamt: **{open_total}**")
-st.sidebar.markdown(f"Lokale Drafts im Batch: **{draft_total}**")
-st.sidebar.markdown(f"Komplette Batch-Faelle reserviert: **{len(batch_state.get('claimed_pair_keys', []))}**")
 
 tolerance_pct = st.sidebar.number_input(
     "Toleranz in Prozent",
@@ -1321,7 +1328,7 @@ if mobile_mode:
             disabled=len(batch_state.get("history", [])) == 0,
         )
         next_local = st.form_submit_button("Weiter", use_container_width=True)
-        save_batch_btn = st.form_submit_button("Beenden", use_container_width=True, type="primary")
+        save_batch_btn = st.form_submit_button("Speichern und Beenden", use_container_width=True, type="primary")
 else:
     header_left, header_right = st.columns([1.0, 2.2])
 
@@ -1365,7 +1372,7 @@ else:
                 next_local = st.form_submit_button("Weiter", use_container_width=True)
             with btn3:
                 save_batch_btn = st.form_submit_button(
-                    "Beenden",
+                    "Speichern und Beenden",
                     use_container_width=True,
                     type="primary",
                 )
@@ -1384,7 +1391,7 @@ if back:
             prev_decision_key = f"decision_{prev_pair_key}"
             prev_comment_key = f"comment_{prev_pair_key}"
             draft = get_draft(batch_state, prev_pair_key)
-            st.session_state[prev_decision_key] = draft.get("decision", DECISION_OPTIONS[0])
+            st.session_state[prev_decision_key] = draft.get("decision", DEFAULT_DECISION)
             st.session_state[prev_comment_key] = draft.get("comment", "")
         st.rerun()
 
@@ -1392,7 +1399,7 @@ if next_local:
     save_draft(
         batch_state=batch_state,
         pair_key=current_pair_key,
-        decision=st.session_state.get(decision_key, DECISION_OPTIONS[0]),
+        decision=st.session_state.get(decision_key, DEFAULT_DECISION),
         comment=st.session_state.get(comment_key, ""),
         mark_completed=True,
     )
@@ -1416,7 +1423,7 @@ if next_local:
             next_pair_key = str(next_pair["pair_key"])
             next_decision_key = f"decision_{next_pair_key}"
             next_comment_key = f"comment_{next_pair_key}"
-            st.session_state[next_decision_key] = DECISION_OPTIONS[0]
+            st.session_state[next_decision_key] = DEFAULT_DECISION
             st.session_state[next_comment_key] = ""
             try:
                 if failed_count == 0:
@@ -1443,7 +1450,7 @@ if next_local:
         new_decision_key = f"decision_{new_pair_key}"
         new_comment_key = f"comment_{new_pair_key}"
         draft = get_draft(batch_state, new_pair_key)
-        st.session_state[new_decision_key] = draft.get("decision", DECISION_OPTIONS[0])
+        st.session_state[new_decision_key] = draft.get("decision", DEFAULT_DECISION)
         st.session_state[new_comment_key] = draft.get("comment", "")
 
     st.rerun()
@@ -1457,7 +1464,7 @@ if save_batch_btn:
     save_draft(
         batch_state=batch_state,
         pair_key=current_pair_key,
-        decision=st.session_state.get(decision_key, DECISION_OPTIONS[0]),
+        decision=st.session_state.get(decision_key, DEFAULT_DECISION),
         comment=st.session_state.get(comment_key, ""),
         mark_completed=True,
     )

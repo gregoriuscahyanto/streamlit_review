@@ -1256,8 +1256,12 @@ render_sidebar_metric(
 )
 
 remaining_seconds, ratio_left, expires_at = get_batch_time_left(batch_state)
-with st.sidebar:
-    render_sidebar_countdown(expires_at)
+render_sidebar_metric(
+    "Zeitlimit Batch",
+    "",
+    expires_at.strftime("%H:%M Uhr") if expires_at is not None else "-",
+    progress_ratio=ratio_left if ratio_left is not None else 0.0,
+)
 
 st.sidebar.markdown("---")
 st.sidebar.markdown(f"Aktueller Review-Run: **{run_label_map.get(selected_run_id, selected_run_id)}**")

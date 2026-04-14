@@ -831,6 +831,16 @@ def current_pair_keys_in_batch(batch_state: dict) -> list[str]:
     return list(batch_state.get("claimed_pair_keys", []))
 
 
+def has_active_batch(batch_state: dict) -> bool:
+    if not batch_state:
+        return False
+    if batch_state.get("current") is not None:
+        return True
+    if batch_state.get("queue"):
+        return True
+    return len(batch_state.get("claimed_pair_keys", [])) > 0
+
+
 def hydrate_batch_state_from_claimed_rows(batch_state: dict, claimed_rows: list[dict]):
     rows_by_pair_key = {}
     claimed_pair_keys = []

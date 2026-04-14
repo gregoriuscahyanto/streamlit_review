@@ -6,7 +6,6 @@ from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 import streamlit as st
-from streamlit.components.v1 import html as components_html
 from sqlalchemy import create_engine, text
 
 st.set_page_config(page_title="Blocking Review", layout="wide")
@@ -985,47 +984,14 @@ def render_sidebar_countdown(expires_at):
         render_sidebar_metric("Zeitlimit Batch", "-", progress_ratio=0.0)
         return
 
-    expiry_ms = int(expires_at.timestamp() * 1000)
-    widget_id = f"countdown_{int(datetime.now(timezone.utc).timestamp() * 1000)}"
-    components_html(
-        f"""
-        <div style="font-family:sans-serif; margin:0 0 6px 0;">
-          <div style="font-size:13px;font-weight:700;margin-bottom:4px;">Zeitlimit Batch</div>
-          <div style="display:grid;grid-template-columns:4.5fr 1.7fr;gap:0.75rem;align-items:center;">
-            <div style="height:10px;background:#ececec;border-radius:999px;overflow:hidden;">
-              <div id="{widget_id}_bar" style="height:100%;width:100%;background:#ef4444;border-radius:999px;transition:width 0.9s linear;"></div>
-            </div>
-            <div id="{widget_id}_text" style="font-size:13px;font-weight:700;text-align:right;white-space:nowrap;"></div>
-          </div>
-        </div>
-        <script>
-        const totalSeconds = {CLAIM_TIMEOUT_MINUTES * 60};
-        const expiryMs = {expiry_ms};
-        const textEl = document.getElementById('{widget_id}_text');
-        const barEl = document.getElementById('{widget_id}_bar');
-        function pad(n) {{ return String(n).padStart(2, '0'); }}
-        function tick() {{
-          const now = Date.now();
-          let remaining = Math.max(0, Math.floor((expiryMs - now) / 1000));
-          const ratio = Math.max(0, Math.min(1, remaining / totalSeconds));
-          const mins = Math.floor(remaining / 60);
-          const secs = remaining % 60;
-          textEl.textContent = pad(mins) + ':' + pad(secs);
-          barEl.style.width = (ratio * 100).toFixed(1) + '%';
-          if (remaining <= 300) {{
-            barEl.style.background = '#f59e0b';
-          }} else {{
-            barEl.style.background = '#ef4444';
-          }}
-          if (remaining <= 60) {{
-            barEl.style.background = '#dc2626';
-          }}
-        }}
-        tick();
-        setInterval(tick, 1000);
-        </script>
-        """,
-        height=54,
+    now_utc = datetime.now(timezone.utc)
+    total_seconds = CLAIM_TIMEOUT_MINUTES * 60
+    remaining_seconds = max(0, int((expires_at - now_utc).total_seconds()))
+    ratio_left = max(0.0, min(1.0, remaining_seconds / total_seconds))
+    render_sidebar_metric(
+        "Zeitlimit Batch",
+        format_remaining_seconds(remaining_seconds),
+        progress_ratio=ratio_left,
     )
 
 

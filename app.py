@@ -1258,7 +1258,7 @@ render_sidebar_metric(
 remaining_seconds, ratio_left, expires_at = get_batch_time_left(batch_state)
 
 if remaining_seconds is not None:
-    left_text = f"{max(0, remaining_seconds // 60)}"
+    left_text = f"{max(0, remaining_seconds // 60)} min"
 else:
     left_text = "-"
 

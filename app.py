@@ -776,6 +776,7 @@ def get_batch_state(run_id: str, reviewer: str) -> dict:
             "rows_by_pair_key": {},
             "claimed_pair_keys": [],
             "claimed_at": None,
+            "completed_pair_keys": [],
         }
     return st.session_state[key]
 
@@ -784,16 +785,17 @@ def get_draft(batch_state: dict, pair_key: str) -> dict:
     return batch_state.setdefault("drafts", {}).get(str(pair_key), {})
 
 
-def save_draft(batch_state: dict, pair_key: str, decision: str, comment: str):
+def save_draft(batch_state: dict, pair_key: str, decision: str, comment: str, mark_completed: bool = False):
     pair_key = str(pair_key)
     cleaned_comment = "" if comment is None else str(comment)
-    if decision == DECISION_OPTIONS[0] and cleaned_comment.strip() == "":
-        batch_state.setdefault("drafts", {}).pop(pair_key, None)
-        return
     batch_state.setdefault("drafts", {})[pair_key] = {
         "decision": decision,
         "comment": cleaned_comment,
     }
+    if mark_completed:
+        completed = batch_state.setdefault("completed_pair_keys", [])
+        if pair_key not in completed:
+            completed.append(pair_key)
 
 
 def prepare_inputs_for_pair(batch_state: dict, pair_key: str):
@@ -854,6 +856,7 @@ def hydrate_batch_state_from_claimed_rows(batch_state: dict, claimed_rows: list[
     batch_state["current"] = batch_state["queue"].pop(0) if batch_state["queue"] else None
     batch_state["history"] = []
     batch_state["drafts"] = {}
+    batch_state["completed_pair_keys"] = []
 
 
 def refill_batch_if_needed(run_id: str, reviewer: str, batch_state: dict):
@@ -897,6 +900,7 @@ def release_all_batch_locks(run_id: str, reviewer: str, batch_state: dict):
     batch_state["current"] = None
     batch_state["history"] = []
     batch_state["drafts"] = {}
+    batch_state["completed_pair_keys"] = []
     batch_state["rows_by_pair_key"] = {}
     batch_state["claimed_pair_keys"] = []
     batch_state["claimed_at"] = None
@@ -1163,7 +1167,7 @@ run_label_map = {row["run_id"]: run_label(row) for _, row in runs_df.iterrows()}
 
 reviewer_before = st.session_state.get("reviewer_name", "")
 reviewer = st.sidebar.text_input(
-    "Reviewer",
+    "Hochschulkürzel (z.B. grcamt00)",
     value=reviewer_before,
     key="reviewer_name",
     placeholder="Pflichtfeld",
@@ -1246,7 +1250,7 @@ progress_value = batch_position / batch_total if batch_total > 0 else 1.0
 # SIDEBAR STATUS
 # =========================================================
 reviewed_by_me_total = fetch_reviewer_total_count(reviewer)
-draft_total = len(batch_state.get("drafts", {}))
+draft_total = len(batch_state.get("completed_pair_keys", []))
 reviewed_by_me_display = reviewed_by_me_total + draft_total
 open_total = fetch_global_open_count()
 batch_size_total = len(batch_state.get("claimed_pair_keys", [])) or batch_state.get("batch_size", DEFAULT_BATCH_SIZE)
@@ -1396,7 +1400,7 @@ else:
                     type="primary",
                 )
 
-save_draft(batch_state, current_pair_key, decision, comment)
+save_draft(batch_state, current_pair_key, decision, comment, mark_completed=False)
 
 # =========================================================
 # ACTIONS
@@ -1420,6 +1424,7 @@ if next_local:
         pair_key=current_pair_key,
         decision=st.session_state.get(decision_key, DECISION_OPTIONS[0]),
         comment=st.session_state.get(comment_key, ""),
+        mark_completed=True,
     )
 
     is_last_item_in_batch = batch_state.get("current") is not None and len(batch_state.get("queue", [])) == 0
@@ -1484,6 +1489,7 @@ if save_batch_btn:
         pair_key=current_pair_key,
         decision=st.session_state.get(decision_key, DECISION_OPTIONS[0]),
         comment=st.session_state.get(comment_key, ""),
+        mark_completed=True,
     )
 
     saved_count, failed_count = save_all_drafts_in_batch(selected_run_id, reviewer, batch_state)

@@ -750,9 +750,7 @@ def save_case_decision(pair_row: dict, decision: str, comment: str, reviewer: st
 def run_label(row) -> str:
     left_source = str(row.get("left_source", ""))
     right_source = str(row.get("right_source", ""))
-    open_case_count = int(row.get("open_case_count", 0) or 0)
-    locked_case_count = int(row.get("locked_case_count", 0) or 0)
-    return f"{left_source} vs {right_source} | offen: {open_case_count} | reserviert: {locked_case_count}"
+    return f"{left_source} vs {right_source}"
 
 
 def get_batch_state_key(run_id: str, reviewer: str) -> str:
@@ -916,27 +914,23 @@ def initialize_batch_for_run(run_id: str, reviewer: str, batch_size: int):
 
 
 def save_all_drafts_in_batch(run_id: str, reviewer: str, batch_state: dict):
-    drafts = dict(batch_state.get("drafts", {}))
-    if not drafts and not batch_state.get("claimed_pair_keys"):
+    completed_pair_keys = [str(x) for x in batch_state.get("completed_pair_keys", [])]
+    rows_by_pair_key = {str(k): v for k, v in dict(batch_state.get("rows_by_pair_key", {})).items()}
+
+    if not completed_pair_keys:
         return 0, 0
 
+    drafts = dict(batch_state.get("drafts", {}))
     saved_count = 0
     failed_count = 0
-    rows_by_pair_key = dict(batch_state.get("rows_by_pair_key", {}))
 
-    for pair_key in batch_state.get("claimed_pair_keys", []):
-        if pair_key not in drafts:
-            drafts[pair_key] = {
-                "decision": DECISION_OPTIONS[0],
-                "comment": "",
-            }
-
-    for pair_key, draft in drafts.items():
-        pair_row = rows_by_pair_key.get(str(pair_key))
+    for pair_key in completed_pair_keys:
+        pair_row = rows_by_pair_key.get(pair_key)
         if pair_row is None:
             failed_count += 1
             continue
 
+        draft = drafts.get(pair_key, {})
         ok = save_case_decision(
             pair_row=pair_row,
             decision=draft.get("decision", DECISION_OPTIONS[0]),
@@ -1183,6 +1177,12 @@ session_total = len(pair_keys)
 run_stats = fetch_run_stats(selected_run_id, reviewer)
 pair_row = batch_state.get("current")
 
+if has_active_batch(batch_state):
+    try:
+        st.autorefresh(interval=1000, key=f"batch_timer_refresh::{reviewer}")
+    except Exception:
+        pass
+
 toast_key = f"batch_loaded_toast::{selected_run_id}::{reviewer}"
 
 
@@ -1270,12 +1270,6 @@ st.sidebar.markdown(
     unsafe_allow_html=True,
 )
 
-if mobile_mode:
-    st.markdown(f"**Batch-Fall {batch_position} / {batch_total}**")
-    st.progress(progress_value)
-else:
-    st.caption(f"Batch-Fall {batch_position} / {batch_total}")
-
 # =========================================================
 # TOP INFO + DECISION
 # =========================================================
@@ -1300,13 +1294,13 @@ if mobile_mode:
     st.markdown('<div class="review-section-title">Entscheidung</div>', unsafe_allow_html=True)
     with st.form(key=f"decision_form_{current_pair_key}"):
         decision = st.radio(
-            "Ist diese Kombination im Blocking sinnvoll?",
+            "Handelt es sich um das gleiche Fahrzeug?",
             options=DECISION_OPTIONS,
             horizontal=False,
             key=decision_key,
             format_func=lambda x: {
-                "BLOCK_OK": "Blocking passt",
-                "BLOCK_NOK": "Blocking passt nicht",
+                "BLOCK_OK": "Ja",
+                "BLOCK_NOK": "Nein",
                 "UNSURE": "Unklar",
             }.get(x, x),
         )
@@ -1338,13 +1332,13 @@ else:
             decision_left, decision_right = st.columns([1.25, 1.0])
             with decision_left:
                 decision = st.radio(
-                    "Ist diese Kombination im Blocking sinnvoll?",
+                    "Handelt es sich um das gleiche Fahrzeug?",
                     options=DECISION_OPTIONS,
                     horizontal=True,
                     key=decision_key,
                     format_func=lambda x: {
-                        "BLOCK_OK": "Blocking passt",
-                        "BLOCK_NOK": "Blocking passt nicht",
+                        "BLOCK_OK": "Ja",
+                        "BLOCK_NOK": "Nein",
                         "UNSURE": "Unklar",
                     }.get(x, x),
                 )
@@ -1447,7 +1441,7 @@ if next_local:
 if save_batch_btn:
     render_blocking_overlay(
         "Warte, Batch wird hochgeladen ...",
-        "Danach wird die Sitzung für diesen Batch beendet."
+        "Danach wird die Sitzung für diesen Batch beendet. Es werden nur bereits ausgewertete Fälle gespeichert."
     )
 
     save_draft(

@@ -107,6 +107,15 @@ def apply_css(mobile_mode: bool):
                 white-space: nowrap;
                 padding-top: 1px;
             }
+            button[kind="primary"] {
+                background:#dc2626 !important;
+                border:1px solid #dc2626 !important;
+                color:white !important;
+            }
+            button[kind="primary"]:hover {
+                background:#b91c1c !important;
+                border-color:#b91c1c !important;
+            }
             </style>
             """,
             unsafe_allow_html=True,
@@ -173,6 +182,15 @@ def apply_css(mobile_mode: bool):
                 text-align: right;
                 white-space: nowrap;
                 padding-top: 1px;
+            }
+            button[kind="primary"] {
+                background:#dc2626 !important;
+                border:1px solid #dc2626 !important;
+                color:white !important;
+            }
+            button[kind="primary"]:hover {
+                background:#b91c1c !important;
+                border-color:#b91c1c !important;
             }
             </style>
             """,
@@ -767,9 +785,14 @@ def get_draft(batch_state: dict, pair_key: str) -> dict:
 
 
 def save_draft(batch_state: dict, pair_key: str, decision: str, comment: str):
-    batch_state.setdefault("drafts", {})[str(pair_key)] = {
+    pair_key = str(pair_key)
+    cleaned_comment = "" if comment is None else str(comment)
+    if decision == DECISION_OPTIONS[0] and cleaned_comment.strip() == "":
+        batch_state.setdefault("drafts", {}).pop(pair_key, None)
+        return
+    batch_state.setdefault("drafts", {})[pair_key] = {
         "decision": decision,
-        "comment": comment,
+        "comment": cleaned_comment,
     }
 
 
@@ -955,20 +978,21 @@ def render_sidebar_value(title: str, value):
 
 def render_sidebar_countdown(expires_at):
     if expires_at is None:
-        st.sidebar.markdown("<div class='sidebar-stat-title'>Zeitlimit Batch</div>", unsafe_allow_html=True)
-        st.sidebar.caption("Kein aktiver Batch-Timer")
+        render_sidebar_metric("Zeitlimit Batch", "-", progress_ratio=0.0)
         return
 
     expiry_ms = int(expires_at.timestamp() * 1000)
     widget_id = f"countdown_{int(datetime.now(timezone.utc).timestamp() * 1000)}"
     components_html(
         f"""
-        <div style="font-family:sans-serif;">
-          <div style="font-size:13px;font-weight:700;margin-bottom:6px;">Zeitlimit Batch</div>
-          <div style="height:12px;background:#ececec;border-radius:999px;overflow:hidden;">
-            <div id="{widget_id}_bar" style="height:100%;width:100%;background:#ef4444;border-radius:999px;transition:width 0.9s linear;"></div>
+        <div style="font-family:sans-serif; margin:0 0 6px 0;">
+          <div style="font-size:13px;font-weight:700;margin-bottom:4px;">Zeitlimit Batch</div>
+          <div style="display:grid;grid-template-columns:4.5fr 1.7fr;gap:0.75rem;align-items:center;">
+            <div style="height:10px;background:#ececec;border-radius:999px;overflow:hidden;">
+              <div id="{widget_id}_bar" style="height:100%;width:100%;background:#ef4444;border-radius:999px;transition:width 0.9s linear;"></div>
+            </div>
+            <div id="{widget_id}_text" style="font-size:13px;font-weight:700;text-align:right;white-space:nowrap;"></div>
           </div>
-          <div id="{widget_id}_text" style="font-size:12px;color:#555;margin-top:6px;"></div>
         </div>
         <script>
         const totalSeconds = {CLAIM_TIMEOUT_MINUTES * 60};
@@ -980,14 +1004,14 @@ def render_sidebar_countdown(expires_at):
           const now = Date.now();
           let remaining = Math.max(0, Math.floor((expiryMs - now) / 1000));
           const ratio = Math.max(0, Math.min(1, remaining / totalSeconds));
-          let mins = Math.floor(remaining / 60);
-          let secs = remaining % 60;
-          const exp = new Date(expiryMs);
-          const expText = pad(exp.getHours()) + ':' + pad(exp.getMinutes()) + ':' + pad(exp.getSeconds());
-          textEl.textContent = 'Noch ' + pad(mins) + ':' + pad(secs) + ' bis ca. ' + expText;
+          const mins = Math.floor(remaining / 60);
+          const secs = remaining % 60;
+          textEl.textContent = pad(mins) + ':' + pad(secs);
           barEl.style.width = (ratio * 100).toFixed(1) + '%';
           if (remaining <= 300) {{
             barEl.style.background = '#f59e0b';
+          }} else {{
+            barEl.style.background = '#ef4444';
           }}
           if (remaining <= 60) {{
             barEl.style.background = '#dc2626';
@@ -997,7 +1021,7 @@ def render_sidebar_countdown(expires_at):
         setInterval(tick, 1000);
         </script>
         """,
-        height=78,
+        height=54,
     )
 
 
@@ -1202,14 +1226,6 @@ def get_batch_signature(batch_state):
     return tuple(keys)
 
 
-current_batch_signature = get_batch_signature(batch_state)
-if st.session_state.get(toast_key) != current_batch_signature and current_batch_signature:
-    try:
-        st.toast(f"Batch geladen: {len(current_batch_signature)} Fälle")
-    except Exception:
-        pass
-    st.session_state[toast_key] = current_batch_signature
-
 if pair_row is None:
     st.success("Dieser Run hat aktuell keine frei verfuegbaren Faelle mehr.")
     st.caption("Entweder ist alles bearbeitet oder die restlichen Faelle sind gerade von anderen Reviewern reserviert.")
@@ -1230,17 +1246,18 @@ progress_value = batch_position / batch_total if batch_total > 0 else 1.0
 # SIDEBAR STATUS
 # =========================================================
 reviewed_by_me_total = fetch_reviewer_total_count(reviewer)
-open_total = fetch_global_open_count()
 draft_total = len(batch_state.get("drafts", {}))
+reviewed_by_me_display = reviewed_by_me_total + draft_total
+open_total = fetch_global_open_count()
 batch_size_total = len(batch_state.get("claimed_pair_keys", [])) or batch_state.get("batch_size", DEFAULT_BATCH_SIZE)
 history_total = len(batch_state.get("history", []))
 
-render_sidebar_value("Bereits bearbeitet von dir", reviewed_by_me_total)
+render_sidebar_value("Bereits bearbeitet von dir", reviewed_by_me_display)
 render_sidebar_metric(
     "Lokaler Batch",
-    batch_position,
+    draft_total,
     batch_total,
-    progress_ratio=(batch_position / batch_total) if batch_total > 0 else 0,
+    progress_ratio=(draft_total / batch_total) if batch_total > 0 else 0,
 )
 render_sidebar_metric(
     "Zurueck History",
@@ -1330,7 +1347,7 @@ if mobile_mode:
             disabled=len(batch_state.get("history", [])) == 0,
         )
         next_local = st.form_submit_button("Weiter", use_container_width=True)
-        save_batch_btn = st.form_submit_button("Beenden", use_container_width=True)
+        save_batch_btn = st.form_submit_button("Beenden", use_container_width=True, type="primary")
 else:
     header_left, header_right = st.columns([1.0, 2.2])
 
@@ -1376,6 +1393,7 @@ else:
                 save_batch_btn = st.form_submit_button(
                     "Beenden",
                     use_container_width=True,
+                    type="primary",
                 )
 
 save_draft(batch_state, current_pair_key, decision, comment)

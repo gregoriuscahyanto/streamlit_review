@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 import streamlit as st
+from streamlit.components.v1 import html as components_html
 from sqlalchemy import create_engine, text
 
 st.set_page_config(page_title="Blocking Review", layout="wide")
@@ -542,6 +543,18 @@ def fetch_reviewer_total_count(reviewer: str) -> int:
         return int(conn.execute(query, {"reviewer": reviewer}).scalar() or 0)
 
 
+def fetch_global_open_count() -> int:
+    query = text(
+        """
+        select count(*)
+        from review.review_cases
+        where status = 'open'
+        """
+    )
+    with engine.connect() as conn:
+        return int(conn.execute(query).scalar() or 0)
+
+
 def get_pair_keys_for_run(run_id: str):
     pair_keys_cache = st.session_state.setdefault("pair_keys_by_run", {})
     if run_id not in pair_keys_cache:
@@ -929,8 +942,93 @@ def render_sidebar_metric(title: str, left_value, right_value=None, progress_rat
 
 
 def render_sidebar_value(title: str, value):
-    st.sidebar.markdown(f"<div class='sidebar-stat-title'>{html.escape(title)}</div>", unsafe_allow_html=True)
-    st.sidebar.markdown(f"<div class='sidebar-stat-value' style='text-align:left'>{html.escape(str(value))}</div>", unsafe_allow_html=True)
+    st.sidebar.markdown(
+        f"""
+        <div style="display:flex;align-items:flex-end;justify-content:space-between;margin:2px 0 10px 0;gap:12px;">
+            <div class='sidebar-stat-title' style="margin-bottom:0;">{html.escape(title)}</div>
+            <div style="font-size:24px;font-weight:800;line-height:1;text-align:right;">{html.escape(str(value))}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_sidebar_countdown(expires_at):
+    if expires_at is None:
+        st.sidebar.markdown("<div class='sidebar-stat-title'>Zeitlimit Batch</div>", unsafe_allow_html=True)
+        st.sidebar.caption("Kein aktiver Batch-Timer")
+        return
+
+    expiry_ms = int(expires_at.timestamp() * 1000)
+    widget_id = f"countdown_{int(datetime.now(timezone.utc).timestamp() * 1000)}"
+    components_html(
+        f"""
+        <div style="font-family:sans-serif;">
+          <div style="font-size:13px;font-weight:700;margin-bottom:6px;">Zeitlimit Batch</div>
+          <div style="height:12px;background:#ececec;border-radius:999px;overflow:hidden;">
+            <div id="{widget_id}_bar" style="height:100%;width:100%;background:#ef4444;border-radius:999px;transition:width 0.9s linear;"></div>
+          </div>
+          <div id="{widget_id}_text" style="font-size:12px;color:#555;margin-top:6px;"></div>
+        </div>
+        <script>
+        const totalSeconds = {CLAIM_TIMEOUT_MINUTES * 60};
+        const expiryMs = {expiry_ms};
+        const textEl = document.getElementById('{widget_id}_text');
+        const barEl = document.getElementById('{widget_id}_bar');
+        function pad(n) {{ return String(n).padStart(2, '0'); }}
+        function tick() {{
+          const now = Date.now();
+          let remaining = Math.max(0, Math.floor((expiryMs - now) / 1000));
+          const ratio = Math.max(0, Math.min(1, remaining / totalSeconds));
+          let mins = Math.floor(remaining / 60);
+          let secs = remaining % 60;
+          const exp = new Date(expiryMs);
+          const expText = pad(exp.getHours()) + ':' + pad(exp.getMinutes()) + ':' + pad(exp.getSeconds());
+          textEl.textContent = 'Noch ' + pad(mins) + ':' + pad(secs) + ' bis ca. ' + expText;
+          barEl.style.width = (ratio * 100).toFixed(1) + '%';
+          if (remaining <= 300) {{
+            barEl.style.background = '#f59e0b';
+          }}
+          if (remaining <= 60) {{
+            barEl.style.background = '#dc2626';
+          }}
+        }}
+        tick();
+        setInterval(tick, 1000);
+        </script>
+        """,
+        height=78,
+    )
+
+
+def batch_has_content(batch_state: dict) -> bool:
+    return bool(batch_state.get("current") is not None or batch_state.get("queue") or batch_state.get("claimed_pair_keys"))
+
+
+def claim_new_batch_any_run(runs_df: pd.DataFrame, reviewer: str, batch_size: int):
+    run_ids = get_randomized_run_options(runs_df["run_id"].tolist())
+    for run_id in run_ids:
+        maybe_cleanup_stale_locks(run_id)
+        claimed = claim_case_batch(run_id, reviewer, batch_size)
+        if claimed:
+            batch_state = get_batch_state(run_id, reviewer)
+            batch_state["batch_size"] = int(batch_size)
+            hydrate_batch_state_from_claimed_rows(batch_state, claimed)
+            st.session_state["active_run_id"] = run_id
+            return run_id, batch_state
+    st.session_state.pop("active_run_id", None)
+    return None, None
+
+
+def get_or_claim_active_batch(runs_df: pd.DataFrame, reviewer: str, batch_size: int):
+    active_run_id = st.session_state.get("active_run_id")
+    valid_run_ids = set(runs_df["run_id"].tolist())
+    if active_run_id in valid_run_ids:
+        batch_state = get_batch_state(active_run_id, reviewer)
+        batch_state["batch_size"] = int(batch_size)
+        if batch_has_content(batch_state):
+            return active_run_id, batch_state
+    return claim_new_batch_any_run(runs_df, reviewer, batch_size)
 
 
 
@@ -1037,7 +1135,6 @@ if runs_df.empty:
     st.success("Keine offenen oder reservierten Runs vorhanden.")
     st.stop()
 
-run_options = get_randomized_run_options(runs_df["run_id"].tolist())
 run_label_map = {row["run_id"]: run_label(row) for _, row in runs_df.iterrows()}
 
 reviewer_before = st.session_state.get("reviewer_name", "")
@@ -1048,12 +1145,7 @@ reviewer = st.sidebar.text_input(
     placeholder="Pflichtfeld",
 )
 
-batch_size = st.sidebar.selectbox(
-    "Batch-Groesse",
-    options=[10],
-    index=0,
-    help="Batch wird komplett gespeichert, sobald der letzte Fall erreicht ist oder du manuell speicherst.",
-)
+batch_size = 10
 
 if not reviewer or not reviewer.strip():
     st.markdown('<div class="reviewer-required-box">', unsafe_allow_html=True)
@@ -1076,40 +1168,25 @@ if completed_state and completed_state.get("reviewer") == reviewer:
     )
     st.stop()
 
-previous_selected_run = st.session_state.get("selected_run_id")
+previous_active_run_id = st.session_state.get("active_run_id")
 
-selected_run_id = st.sidebar.selectbox(
-    "Review-Run auswählen",
-    options=["-- bitte wählen --"] + run_options,
-    index=0 if "selected_run_id" not in st.session_state else (
-        run_options.index(st.session_state["selected_run_id"]) + 1
-        if st.session_state["selected_run_id"] in run_options else 0
-    ),
-    format_func=lambda x: run_label_map.get(x, x) if x != "-- bitte wählen --" else x,
-)
+if reviewer_before and reviewer_before != reviewer and previous_active_run_id is not None:
+    old_batch = get_batch_state(previous_active_run_id, reviewer_before)
+    release_all_batch_locks(previous_active_run_id, reviewer_before, old_batch)
+    reset_batch_state(previous_active_run_id, reviewer_before)
+    st.session_state.pop("active_run_id", None)
 
-if selected_run_id == "-- bitte wählen --":
-    st.warning("Bitte Review-Run auswählen")
+selected_run_id, batch_state = get_or_claim_active_batch(runs_df, reviewer, batch_size)
+
+if selected_run_id is None or batch_state is None:
+    st.success("Aktuell sind keine frei verfügbaren Fälle vorhanden.")
+    st.caption("Entweder ist alles bearbeitet oder die restlichen Fälle sind gerade von anderen Reviewern reserviert.")
     st.stop()
 
-st.session_state["selected_run_id"] = selected_run_id
-
-if previous_selected_run != selected_run_id and previous_selected_run in run_options:
-    old_batch = get_batch_state(previous_selected_run, reviewer)
-    release_all_batch_locks(previous_selected_run, reviewer, old_batch)
-    reset_batch_state(previous_selected_run, reviewer)
-
-if reviewer_before and reviewer_before != reviewer and previous_selected_run == selected_run_id:
-    old_batch = get_batch_state(selected_run_id, reviewer_before)
-    release_all_batch_locks(selected_run_id, reviewer_before, old_batch)
-    reset_batch_state(selected_run_id, reviewer_before)
-
-maybe_cleanup_stale_locks(selected_run_id)
-
+st.session_state["active_run_id"] = selected_run_id
 pair_keys = get_pair_keys_for_run(selected_run_id)
 session_total = len(pair_keys)
 run_stats = fetch_run_stats(selected_run_id, reviewer)
-batch_state = initialize_batch_for_run(selected_run_id, reviewer, int(batch_size))
 pair_row = batch_state.get("current")
 
 toast_key = f"batch_loaded_toast::{selected_run_id}::{reviewer}"
@@ -1152,19 +1229,18 @@ progress_value = batch_position / batch_total if batch_total > 0 else 1.0
 # =========================================================
 # SIDEBAR STATUS
 # =========================================================
-reviewed_by_me_total = int(run_stats.get("reviewed_by_me_count", 0) or 0)
-open_total = int(run_stats.get("open_count", 0) or 0)
+reviewed_by_me_total = fetch_reviewer_total_count(reviewer)
+open_total = fetch_global_open_count()
 draft_total = len(batch_state.get("drafts", {}))
-remaining = 1 + len(batch_state.get("queue", []))
-batch_size_total = batch_state.get("batch_size", DEFAULT_BATCH_SIZE)
+batch_size_total = len(batch_state.get("claimed_pair_keys", [])) or batch_state.get("batch_size", DEFAULT_BATCH_SIZE)
 history_total = len(batch_state.get("history", []))
 
 render_sidebar_value("Bereits bearbeitet von dir", reviewed_by_me_total)
 render_sidebar_metric(
     "Lokaler Batch",
-    remaining,
-    batch_size_total,
-    progress_ratio=remaining / batch_size_total if batch_size_total > 0 else 0,
+    batch_position,
+    batch_total,
+    progress_ratio=(batch_position / batch_total) if batch_total > 0 else 0,
 )
 render_sidebar_metric(
     "Zurueck History",
@@ -1174,16 +1250,11 @@ render_sidebar_metric(
 )
 
 remaining_seconds, ratio_left, expires_at = get_batch_time_left(batch_state)
-st.sidebar.markdown("<div class='sidebar-stat-title'>Zeitlimit Batch</div>", unsafe_allow_html=True)
-st.sidebar.progress(ratio_left if ratio_left is not None else 0.0)
-if expires_at is not None:
-    expiry_text = expires_at.astimezone().strftime("%H:%M:%S")
-    st.sidebar.caption(f"Noch {format_remaining_seconds(remaining_seconds)} bis ca. {expiry_text}")
-else:
-    st.sidebar.caption("Kein aktiver Batch-Timer")
+with st.sidebar:
+    render_sidebar_countdown(expires_at)
 
 st.sidebar.markdown("---")
-st.sidebar.write(f"Run ID: {selected_run_id}")
+st.sidebar.markdown(f"Aktueller Review-Run: **{run_label_map.get(selected_run_id, selected_run_id)}**")
 st.sidebar.markdown(f"Noch offen insgesamt: **{open_total}**")
 st.sidebar.markdown(f"Lokale Drafts im Batch: **{draft_total}**")
 st.sidebar.markdown(f"Komplette Batch-Faelle reserviert: **{len(batch_state.get('claimed_pair_keys', []))}**")
@@ -1216,7 +1287,7 @@ if mobile_mode:
     st.markdown(f"**Batch-Fall {batch_position} / {batch_total}**")
     st.progress(progress_value)
 else:
-    st.caption(f"Batch-Fall {batch_position} / {batch_total} | Run-Fälle insgesamt: {session_total}")
+    st.caption(f"Batch-Fall {batch_position} / {batch_total}")
 
 # =========================================================
 # TOP INFO + DECISION
@@ -1343,9 +1414,11 @@ if next_local:
         move_to_next_local(selected_run_id, reviewer, batch_state, keep_current_in_history=True)
         saved_count, failed_count = save_all_drafts_in_batch(selected_run_id, reviewer, batch_state)
         release_all_batch_locks(selected_run_id, reviewer, batch_state)
-        refill_batch_if_needed(selected_run_id, reviewer, batch_state)
+        reset_batch_state(selected_run_id, reviewer)
+        st.session_state.pop("active_run_id", None)
+        next_run_id, next_batch_state = claim_new_batch_any_run(runs_df, reviewer, batch_size)
 
-        next_pair = batch_state.get("current")
+        next_pair = next_batch_state.get("current") if next_batch_state is not None else None
         if next_pair is not None:
             next_pair_key = str(next_pair["pair_key"])
             next_decision_key = f"decision_{next_pair_key}"

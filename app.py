@@ -1,7 +1,8 @@
 import html
 import json
+import random
 import re
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 import streamlit as st
@@ -12,8 +13,9 @@ st.set_page_config(page_title="Blocking Review", layout="wide")
 DECISION_OPTIONS = ["BLOCK_OK", "BLOCK_NOK", "UNSURE"]
 CLAIM_TIMEOUT_MINUTES = 30
 REQUIRED_LOCK_COLUMNS = {"locked_by", "locked_at"}
-DEFAULT_BATCH_SIZE = 20
+DEFAULT_BATCH_SIZE = 10
 MAX_BACK_HISTORY = 5
+RUN_RANDOM_SEED_KEY = "run_random_seed"
 
 
 @st.cache_resource
@@ -483,7 +485,6 @@ def fetch_runs() -> pd.DataFrame:
           on r.run_id = c.run_id
         where c.status in ('open', 'in_review')
         group by r.run_id, r.left_source, r.right_source
-        order by last_case_update desc nulls last, r.run_id desc
         """
     )
     with engine.connect() as conn:
@@ -496,7 +497,6 @@ def fetch_run_pair_keys(run_id: str):
         select pair_key
         from review.review_cases
         where run_id = :run_id
-        order by score_total asc nulls last, pair_key asc
         """
     )
     with engine.connect() as conn:
@@ -512,14 +512,14 @@ def fetch_run_stats(run_id: str, reviewer: str) -> dict:
             count(*) filter (where status = 'in_review') as locked_count,
             count(*) filter (where status = 'in_review' and locked_by = :reviewer) as my_locked_count,
             count(*) filter (where status = 'reviewed') as reviewed_count,
+            count(*) as total_count,
             count(*) filter (where status = 'reviewed' and exists (
                 select 1
                 from review.review_labels rl
                 where rl.run_id = c.run_id
                   and rl.pair_key = c.pair_key
                   and rl.reviewer = :reviewer
-            )) as reviewed_by_me_count,
-            count(*) as total_count
+            )) as reviewed_by_me_count
         from review.review_cases c
         where run_id = :run_id
         """
@@ -527,6 +527,7 @@ def fetch_run_stats(run_id: str, reviewer: str) -> dict:
     with engine.connect() as conn:
         row = conn.execute(query, {"run_id": run_id, "reviewer": reviewer}).mappings().one()
     return dict(row)
+
 
 
 def fetch_reviewer_total_count(reviewer: str) -> int:
@@ -563,7 +564,7 @@ def claim_case_batch(run_id: str, reviewer: str, batch_size: int):
                     from review.review_cases
                     where run_id = :run_id
                       and status = 'open'
-                    order by score_total asc nulls last, pair_key asc
+                    order by random()
                     for update skip locked
                     limit :batch_size
                 )
@@ -741,6 +742,9 @@ def get_batch_state(run_id: str, reviewer: str) -> dict:
             "history": [],
             "batch_size": DEFAULT_BATCH_SIZE,
             "drafts": {},
+            "rows_by_pair_key": {},
+            "claimed_pair_keys": [],
+            "claimed_at": None,
         }
     return st.session_state[key]
 
@@ -756,10 +760,6 @@ def save_draft(batch_state: dict, pair_key: str, decision: str, comment: str):
     }
 
 
-def clear_draft(batch_state: dict, pair_key: str):
-    batch_state.setdefault("drafts", {}).pop(str(pair_key), None)
-
-
 def prepare_inputs_for_pair(batch_state: dict, pair_key: str):
     decision_key = f"decision_{pair_key}"
     comment_key = f"comment_{pair_key}"
@@ -773,17 +773,6 @@ def prepare_inputs_for_pair(batch_state: dict, pair_key: str):
         st.session_state[comment_key] = draft.get("comment", "")
 
     return decision_key, comment_key
-
-
-def sync_draft_from_widgets(batch_state: dict, pair_key: str):
-    decision_key = f"decision_{pair_key}"
-    comment_key = f"comment_{pair_key}"
-    save_draft(
-        batch_state=batch_state,
-        pair_key=pair_key,
-        decision=st.session_state.get(decision_key, DECISION_OPTIONS[0]),
-        comment=st.session_state.get(comment_key, ""),
-    )
 
 
 def push_history(batch_state: dict, pair_row: dict):
@@ -804,15 +793,31 @@ def pop_history(batch_state: dict):
 
 
 def current_pair_keys_in_batch(batch_state: dict) -> list[str]:
-    keys = []
-    current = batch_state.get("current")
-    if current is not None:
-        keys.append(str(current["pair_key"]))
-    for row in batch_state.get("queue", []):
-        keys.append(str(row["pair_key"]))
-    for row in batch_state.get("history", []):
-        keys.append(str(row["pair_key"]))
-    return list(dict.fromkeys(keys))
+    return list(batch_state.get("claimed_pair_keys", []))
+
+
+def hydrate_batch_state_from_claimed_rows(batch_state: dict, claimed_rows: list[dict]):
+    rows_by_pair_key = {}
+    claimed_pair_keys = []
+
+    for row in claimed_rows:
+        pair_key = str(row["pair_key"])
+        rows_by_pair_key[pair_key] = row
+        claimed_pair_keys.append(pair_key)
+
+    claimed_at = None
+    if claimed_rows:
+        locked_values = [row.get("locked_at") for row in claimed_rows if row.get("locked_at") is not None]
+        if locked_values:
+            claimed_at = min(locked_values)
+
+    batch_state["rows_by_pair_key"] = rows_by_pair_key
+    batch_state["claimed_pair_keys"] = claimed_pair_keys
+    batch_state["claimed_at"] = claimed_at
+    batch_state["queue"] = claimed_rows.copy()
+    batch_state["current"] = batch_state["queue"].pop(0) if batch_state["queue"] else None
+    batch_state["history"] = []
+    batch_state["drafts"] = {}
 
 
 def refill_batch_if_needed(run_id: str, reviewer: str, batch_state: dict):
@@ -821,9 +826,9 @@ def refill_batch_if_needed(run_id: str, reviewer: str, batch_state: dict):
         current_count += 1
     if current_count > 0:
         return
+
     claimed = claim_case_batch(run_id, reviewer, batch_state.get("batch_size", DEFAULT_BATCH_SIZE))
-    batch_state["queue"] = claimed
-    batch_state["current"] = batch_state["queue"].pop(0) if batch_state["queue"] else None
+    hydrate_batch_state_from_claimed_rows(batch_state, claimed)
 
 
 def move_to_next_local(run_id: str, reviewer: str, batch_state: dict, keep_current_in_history: bool = True):
@@ -856,6 +861,9 @@ def release_all_batch_locks(run_id: str, reviewer: str, batch_state: dict):
     batch_state["current"] = None
     batch_state["history"] = []
     batch_state["drafts"] = {}
+    batch_state["rows_by_pair_key"] = {}
+    batch_state["claimed_pair_keys"] = []
+    batch_state["claimed_at"] = None
 
 
 def initialize_batch_for_run(run_id: str, reviewer: str, batch_size: int):
@@ -870,23 +878,22 @@ def initialize_batch_for_run(run_id: str, reviewer: str, batch_size: int):
 
 def save_all_drafts_in_batch(run_id: str, reviewer: str, batch_state: dict):
     drafts = dict(batch_state.get("drafts", {}))
-    if not drafts:
+    if not drafts and not batch_state.get("claimed_pair_keys"):
         return 0, 0
 
     saved_count = 0
     failed_count = 0
+    rows_by_pair_key = dict(batch_state.get("rows_by_pair_key", {}))
 
-    row_map = {}
-    for row in batch_state.get("history", []):
-        row_map[str(row["pair_key"])] = row
-    for row in batch_state.get("queue", []):
-        row_map[str(row["pair_key"])] = row
-    current = batch_state.get("current")
-    if current is not None:
-        row_map[str(current["pair_key"])] = current
+    for pair_key in batch_state.get("claimed_pair_keys", []):
+        if pair_key not in drafts:
+            drafts[pair_key] = {
+                "decision": DECISION_OPTIONS[0],
+                "comment": "",
+            }
 
     for pair_key, draft in drafts.items():
-        pair_row = row_map.get(str(pair_key))
+        pair_row = rows_by_pair_key.get(str(pair_key))
         if pair_row is None:
             failed_count += 1
             continue
@@ -926,6 +933,7 @@ def render_sidebar_value(title: str, value):
     st.sidebar.markdown(f"<div class='sidebar-stat-value' style='text-align:left'>{html.escape(str(value))}</div>", unsafe_allow_html=True)
 
 
+
 def render_blocking_overlay(message: str, submessage: str = ""):
     sub_html = ""
     if submessage:
@@ -960,6 +968,50 @@ def render_blocking_overlay(message: str, submessage: str = ""):
     )
 
 
+def normalize_to_utc(dt_value):
+    if dt_value is None:
+        return None
+    if isinstance(dt_value, pd.Timestamp):
+        dt_value = dt_value.to_pydatetime()
+    if dt_value.tzinfo is None:
+        return dt_value.replace(tzinfo=timezone.utc)
+    return dt_value.astimezone(timezone.utc)
+
+
+def get_batch_time_left(batch_state: dict):
+    claimed_at = normalize_to_utc(batch_state.get("claimed_at"))
+    if claimed_at is None:
+        return None, None, None
+
+    expires_at = claimed_at + timedelta(minutes=CLAIM_TIMEOUT_MINUTES)
+    now_utc = datetime.now(timezone.utc)
+    remaining_seconds = int((expires_at - now_utc).total_seconds())
+    total_seconds = CLAIM_TIMEOUT_MINUTES * 60
+    ratio_left = max(0.0, min(1.0, remaining_seconds / total_seconds))
+    return remaining_seconds, ratio_left, expires_at
+
+
+def format_remaining_seconds(seconds):
+    if seconds is None:
+        return "-"
+    if seconds <= 0:
+        return "00:00"
+    minutes, sec = divmod(int(seconds), 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours > 0:
+        return f"{hours:02d}:{minutes:02d}:{sec:02d}"
+    return f"{minutes:02d}:{sec:02d}"
+
+
+def get_randomized_run_options(run_options: list[str]) -> list[str]:
+    if RUN_RANDOM_SEED_KEY not in st.session_state:
+        st.session_state[RUN_RANDOM_SEED_KEY] = random.randint(0, 10**9)
+    rng = random.Random(st.session_state[RUN_RANDOM_SEED_KEY])
+    randomized = list(run_options)
+    rng.shuffle(randomized)
+    return randomized
+
+
 # =========================================================
 # APP START
 # =========================================================
@@ -985,7 +1037,7 @@ if runs_df.empty:
     st.success("Keine offenen oder reservierten Runs vorhanden.")
     st.stop()
 
-run_options = runs_df["run_id"].tolist()
+run_options = get_randomized_run_options(runs_df["run_id"].tolist())
 run_label_map = {row["run_id"]: run_label(row) for _, row in runs_df.iterrows()}
 
 reviewer_before = st.session_state.get("reviewer_name", "")
@@ -998,15 +1050,14 @@ reviewer = st.sidebar.text_input(
 
 batch_size = st.sidebar.selectbox(
     "Batch-Groesse",
-    options=[5, 10, 20, 50],
-    index=[5, 10, 20, 50].index(DEFAULT_BATCH_SIZE),
-    help="Groesserer Batch = schnelleres lokales Weiter/Zurueck, aber mehr initialer DB-Traffic.",
+    options=[10],
+    index=0,
+    help="Batch wird komplett gespeichert, sobald der letzte Fall erreicht ist oder du manuell speicherst.",
 )
 
 if not reviewer or not reviewer.strip():
     st.markdown('<div class="reviewer-required-box">', unsafe_allow_html=True)
     st.warning("Bitte zuerst einen Reviewer-Namen eingeben.")
-    st.caption("Es gibt bewusst keinen Default-Wert mehr, damit nicht alle als 'user' speichern.")
     st.markdown("</div>", unsafe_allow_html=True)
     st.stop()
 
@@ -1019,7 +1070,10 @@ if completed_state and completed_state.get("reviewer") == reviewer:
         f"Du hast insgesamt schon {completed_state.get('total_reviewed', 0)} Fälle bearbeitet."
     )
     st.markdown("<div style='height:320px'></div>", unsafe_allow_html=True)
-    st.success(f"Danke! {reviewer} hat insgesamt {completed_state.get('total_reviewed', 0)} Fälle bearbeitet.")
+    st.success(
+        f"Danke! {reviewer} hat insgesamt {completed_state.get('total_reviewed', 0)} Fälle bearbeitet. "
+        f"Im letzten Batch gespeichert: {completed_state.get('saved_count', 0)}, Fehler: {completed_state.get('failed_count', 0)}."
+    )
     st.stop()
 
 previous_selected_run = st.session_state.get("selected_run_id")
@@ -1039,18 +1093,6 @@ if selected_run_id == "-- bitte wählen --":
     st.stop()
 
 st.session_state["selected_run_id"] = selected_run_id
-
-# =========================================================
-# INITIAL USER SELECTION GATE
-# =========================================================
-
-if selected_run_id is None:
-    st.warning("Bitte Review-Run auswählen")
-    st.stop()
-
-if not batch_size:
-    st.warning("Bitte Batch-Größe wählen")
-    st.stop()
 
 if previous_selected_run != selected_run_id and previous_selected_run in run_options:
     old_batch = get_batch_state(previous_selected_run, reviewer)
@@ -1072,6 +1114,7 @@ pair_row = batch_state.get("current")
 
 toast_key = f"batch_loaded_toast::{selected_run_id}::{reviewer}"
 
+
 def get_batch_signature(batch_state):
     keys = []
     current = batch_state.get("current")
@@ -1080,6 +1123,7 @@ def get_batch_signature(batch_state):
     for row in batch_state.get("queue", []):
         keys.append(row["pair_key"])
     return tuple(keys)
+
 
 current_batch_signature = get_batch_signature(batch_state)
 if st.session_state.get(toast_key) != current_batch_signature and current_batch_signature:
@@ -1101,30 +1145,26 @@ right_payload = parse_payload(pair_row["right_payload"])
 left_title_dynamic = str(pair_row.get("left_source", "Left"))
 right_title_dynamic = str(pair_row.get("right_source", "Right"))
 
-session_pair_number = pair_keys.index(current_pair_key) + 1 if current_pair_key in pair_keys else 1
-progress_value = session_pair_number / session_total if session_total > 0 else 1.0
+batch_position = len(batch_state.get("history", [])) + 1
+batch_total = len(batch_state.get("claimed_pair_keys", []))
+progress_value = batch_position / batch_total if batch_total > 0 else 1.0
 
 # =========================================================
 # SIDEBAR STATUS
 # =========================================================
-reviewed_total = int(run_stats.get("reviewed_count", 0) or 0)
+reviewed_by_me_total = int(run_stats.get("reviewed_by_me_count", 0) or 0)
 open_total = int(run_stats.get("open_count", 0) or 0)
 draft_total = len(batch_state.get("drafts", {}))
 remaining = 1 + len(batch_state.get("queue", []))
 batch_size_total = batch_state.get("batch_size", DEFAULT_BATCH_SIZE)
 history_total = len(batch_state.get("history", []))
 
-render_sidebar_metric(
-    "Bereits bearbeitet insgesamt / Noch offen insgesamt",
-    reviewed_total,
-    open_total,
-    progress_ratio=(reviewed_total / (reviewed_total + open_total)) if (reviewed_total + open_total) > 0 else 0.0,
-)
+render_sidebar_value("Bereits bearbeitet von dir", reviewed_by_me_total)
 render_sidebar_metric(
     "Lokaler Batch",
     remaining,
     batch_size_total,
-    progress_ratio=remaining / batch_size_total if batch_size_total > 0 else 0
+    progress_ratio=remaining / batch_size_total if batch_size_total > 0 else 0,
 )
 render_sidebar_metric(
     "Zurueck History",
@@ -1133,8 +1173,20 @@ render_sidebar_metric(
     progress_ratio=(history_total / MAX_BACK_HISTORY) if MAX_BACK_HISTORY > 0 else 0.0,
 )
 
+remaining_seconds, ratio_left, expires_at = get_batch_time_left(batch_state)
+st.sidebar.markdown("<div class='sidebar-stat-title'>Zeitlimit Batch</div>", unsafe_allow_html=True)
+st.sidebar.progress(ratio_left if ratio_left is not None else 0.0)
+if expires_at is not None:
+    expiry_text = expires_at.astimezone().strftime("%H:%M:%S")
+    st.sidebar.caption(f"Noch {format_remaining_seconds(remaining_seconds)} bis ca. {expiry_text}")
+else:
+    st.sidebar.caption("Kein aktiver Batch-Timer")
+
 st.sidebar.markdown("---")
 st.sidebar.write(f"Run ID: {selected_run_id}")
+st.sidebar.markdown(f"Noch offen insgesamt: **{open_total}**")
+st.sidebar.markdown(f"Lokale Drafts im Batch: **{draft_total}**")
+st.sidebar.markdown(f"Komplette Batch-Faelle reserviert: **{len(batch_state.get('claimed_pair_keys', []))}**")
 
 tolerance_pct = st.sidebar.number_input(
     "Toleranz in Prozent",
@@ -1161,8 +1213,10 @@ st.sidebar.markdown(
 )
 
 if mobile_mode:
-    st.markdown(f"**Session-Paar {session_pair_number} / {session_total}**")
+    st.markdown(f"**Batch-Fall {batch_position} / {batch_total}**")
     st.progress(progress_value)
+else:
+    st.caption(f"Batch-Fall {batch_position} / {batch_total} | Run-Fälle insgesamt: {session_total}")
 
 # =========================================================
 # TOP INFO + DECISION
@@ -1253,7 +1307,6 @@ else:
                     use_container_width=True,
                 )
 
-# Draft nach Form-Submit sichern
 save_draft(batch_state, current_pair_key, decision, comment)
 
 # =========================================================
@@ -1273,7 +1326,6 @@ if back:
         st.rerun()
 
 if next_local:
-    # Aktuellen Eintrag vor Navigation sicher als Draft speichern
     save_draft(
         batch_state=batch_state,
         pair_key=current_pair_key,
@@ -1281,7 +1333,6 @@ if next_local:
         comment=st.session_state.get(comment_key, ""),
     )
 
-    # Prüfen: Bin ich gerade auf dem letzten Eintrag des aktuellen Batches?
     is_last_item_in_batch = batch_state.get("current") is not None and len(batch_state.get("queue", [])) == 0
 
     if is_last_item_in_batch:
@@ -1289,14 +1340,8 @@ if next_local:
             "Warte, Batch wird hochgeladen und neuer Batch wird geholt ...",
             "Bitte kurz nichts eingeben."
         )
-
-        # Letzten Fall noch in die History schieben
         move_to_next_local(selected_run_id, reviewer, batch_state, keep_current_in_history=True)
-
-        # Jetzt kompletten Batch speichern
         saved_count, failed_count = save_all_drafts_in_batch(selected_run_id, reviewer, batch_state)
-
-        # Alte Locks freigeben und neuen Batch holen
         release_all_batch_locks(selected_run_id, reviewer, batch_state)
         refill_batch_if_needed(selected_run_id, reviewer, batch_state)
 
@@ -1305,10 +1350,8 @@ if next_local:
             next_pair_key = str(next_pair["pair_key"])
             next_decision_key = f"decision_{next_pair_key}"
             next_comment_key = f"comment_{next_pair_key}"
-
             st.session_state[next_decision_key] = DECISION_OPTIONS[0]
             st.session_state[next_comment_key] = ""
-
             try:
                 if failed_count == 0:
                     st.toast(f"Batch automatisch gespeichert und neuer Batch geladen: {saved_count} Fälle")
@@ -1324,10 +1367,8 @@ if next_local:
                     st.toast(f"Letzter Batch verarbeitet. Gespeichert: {saved_count}, Fehler: {failed_count}")
             except Exception:
                 pass
-
         st.rerun()
 
-    # Normaler lokaler Weiter-Klick innerhalb des Batches
     move_to_next_local(selected_run_id, reviewer, batch_state, keep_current_in_history=True)
 
     new_current = batch_state.get("current")
@@ -1347,7 +1388,6 @@ if save_batch_btn:
         "Danach wird die Sitzung für diesen Batch beendet."
     )
 
-    # aktuellen Eintrag vor Batch-Save sichern
     save_draft(
         batch_state=batch_state,
         pair_key=current_pair_key,

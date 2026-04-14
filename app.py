@@ -961,7 +961,6 @@ batch_size = st.sidebar.selectbox(
 if not reviewer or not reviewer.strip():
     st.markdown('<div class="reviewer-required-box">', unsafe_allow_html=True)
     st.warning("Bitte zuerst einen Reviewer-Namen eingeben.")
-    st.caption("Es gibt bewusst keinen Default-Wert mehr, damit nicht alle als 'user' speichern.")
     st.markdown("</div>", unsafe_allow_html=True)
     st.stop()
 

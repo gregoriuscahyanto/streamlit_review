@@ -457,7 +457,7 @@ def ensure_lock_columns():
         """
         select column_name
         from information_schema.columns
-        where table_schema = 'review'
+        where table_schema = 'review_dev'
           and table_name = 'review_cases'
         """
     )
@@ -477,7 +477,7 @@ def maybe_cleanup_stale_locks(run_id: str):
         conn.execute(
             text(
                 """
-                update review.review_cases
+                update review_dev.review_cases
                 set status = 'open',
                     locked_by = null,
                     locked_at = null,
@@ -504,8 +504,8 @@ def fetch_runs() -> pd.DataFrame:
             count(*) filter (where c.status = 'open') as open_case_count,
             count(*) filter (where c.status = 'in_review') as locked_case_count,
             max(c.updated_at) as last_case_update
-        from review.review_runs r
-        join review.review_cases c
+        from review_dev.review_runs r
+        join review_dev.review_cases c
           on r.run_id = c.run_id
         where c.status in ('open', 'in_review')
         group by r.run_id, r.left_source, r.right_source
@@ -519,7 +519,7 @@ def fetch_run_pair_keys(run_id: str):
     query = text(
         """
         select pair_key
-        from review.review_cases
+        from review_dev.review_cases
         where run_id = :run_id
         """
     )
@@ -539,12 +539,12 @@ def fetch_run_stats(run_id: str, reviewer: str) -> dict:
             count(*) as total_count,
             count(*) filter (where status = 'reviewed' and exists (
                 select 1
-                from review.review_labels rl
+                from review_dev.review_labels rl
                 where rl.run_id = c.run_id
                   and rl.pair_key = c.pair_key
                   and rl.reviewer = :reviewer
             )) as reviewed_by_me_count
-        from review.review_cases c
+        from review_dev.review_cases c
         where run_id = :run_id
         """
     )
@@ -558,7 +558,7 @@ def fetch_reviewer_total_count(reviewer: str) -> int:
     query = text(
         """
         select count(*)
-        from review.review_labels
+        from review_dev.review_labels
         where reviewer = :reviewer
         """
     )
@@ -570,7 +570,7 @@ def fetch_global_open_count() -> int:
     query = text(
         """
         select count(*)
-        from review.review_cases
+        from review_dev.review_cases
         where status = 'open'
         """
     )
@@ -597,14 +597,14 @@ def claim_case_batch(run_id: str, reviewer: str, batch_size: int):
                 """
                 with next_cases as (
                     select pair_key
-                    from review.review_cases
+                    from review_dev.review_cases
                     where run_id = :run_id
                       and status = 'open'
                     order by random()
                     for update skip locked
                     limit :batch_size
                 )
-                update review.review_cases c
+                update review_dev.review_cases c
                 set status = 'in_review',
                     locked_by = :reviewer,
                     locked_at = now(),
@@ -640,7 +640,7 @@ def release_case_batch(run_id: str, pair_keys: list[str], reviewer: str):
         conn.execute(
             text(
                 """
-                update review.review_cases
+                update review_dev.review_cases
                 set status = 'open',
                     locked_by = null,
                     locked_at = null,
@@ -660,7 +660,7 @@ def save_case_decision(pair_row: dict, decision: str, comment: str, reviewer: st
         updated = conn.execute(
             text(
                 """
-                update review.review_cases
+                update review_dev.review_cases
                 set status = 'reviewed',
                     locked_by = null,
                     locked_at = null,
@@ -685,7 +685,7 @@ def save_case_decision(pair_row: dict, decision: str, comment: str, reviewer: st
         conn.execute(
             text(
                 """
-                insert into review.review_labels (
+                insert into review_dev.review_labels (
                     run_id,
                     pair_key,
                     pair_id,
@@ -726,7 +726,7 @@ def save_case_decision(pair_row: dict, decision: str, comment: str, reviewer: st
             text(
                 """
                 select count(*)
-                from review.review_cases
+                from review_dev.review_cases
                 where run_id = :run_id
                   and status in ('open', 'in_review')
                 """
@@ -738,7 +738,7 @@ def save_case_decision(pair_row: dict, decision: str, comment: str, reviewer: st
             conn.execute(
                 text(
                     """
-                    update review.review_runs
+                    update review_dev.review_runs
                     set status = 'reviewed',
                         updated_at = now()
                     where run_id = :run_id
@@ -1123,10 +1123,10 @@ st.markdown('<div class="app-main-title">Blocking Review</div>', unsafe_allow_ht
 
 missing_columns = ensure_lock_columns()
 if missing_columns:
-    st.error("In review.review_cases fehlen Lock-Spalten fuer Multi-User-Betrieb.")
+    st.error("In review_dev.review_cases fehlen Lock-Spalten fuer Multi-User-Betrieb.")
     st.code(
         """
-ALTER TABLE review.review_cases
+ALTER TABLE review_dev.review_cases
 ADD COLUMN IF NOT EXISTS locked_by text,
 ADD COLUMN IF NOT EXISTS locked_at timestamptz;
         """.strip(),

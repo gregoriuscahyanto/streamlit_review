@@ -8,11 +8,6 @@ import pandas as pd
 import streamlit as st
 from sqlalchemy import create_engine, text
 
-try:
-    from streamlit_autorefresh import st_autorefresh
-except Exception:
-    st_autorefresh = None
-
 st.set_page_config(page_title="Blocking Review", layout="wide")
 
 DECISION_OPTIONS = ["BLOCK_OK", "BLOCK_NOK", "UNSURE"]
@@ -468,7 +463,7 @@ def ensure_lock_columns():
 
 def maybe_cleanup_stale_locks(run_id: str):
     cleanup_map = st.session_state.setdefault("cleanup_ts_by_run", {})
-    now_ts = datetime.utcnow().timestamp()
+    now_ts = datetime.now(timezone.utc).timestamp()
     last_ts = cleanup_map.get(run_id, 0.0)
     if now_ts - last_ts < 60:
         return
@@ -485,7 +480,7 @@ def maybe_cleanup_stale_locks(run_id: str):
                 where run_id = :run_id
                   and status = 'in_review'
                   and locked_at is not null
-                  and locked_at < now() - make_interval(mins => :timeout_minutes)
+                  and locked_at::timestamptz < now() - make_interval(mins => :timeout_minutes)
                 """
             ),
             {"run_id": run_id, "timeout_minutes": CLAIM_TIMEOUT_MINUTES},
@@ -1073,8 +1068,21 @@ def render_blocking_overlay(message: str, submessage: str = ""):
 def normalize_to_utc(dt_value):
     if dt_value is None:
         return None
+    if isinstance(dt_value, str):
+        raw = dt_value.strip()
+        if not raw:
+            return None
+        try:
+            dt_value = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            parsed = pd.to_datetime(raw, utc=True, errors="coerce")
+            if pd.isna(parsed):
+                return None
+            dt_value = parsed.to_pydatetime()
     if isinstance(dt_value, pd.Timestamp):
         dt_value = dt_value.to_pydatetime()
+    if not isinstance(dt_value, datetime):
+        return None
     if dt_value.tzinfo is None:
         return dt_value.replace(tzinfo=timezone.utc)
     return dt_value.astimezone(timezone.utc)
@@ -1192,15 +1200,6 @@ pair_keys = get_pair_keys_for_run(selected_run_id)
 session_total = len(pair_keys)
 run_stats = fetch_run_stats(selected_run_id, reviewer)
 pair_row = batch_state.get("current")
-
-if has_active_batch(batch_state):
-    try:
-        if hasattr(st, "autorefresh"):
-            st.autorefresh(interval=1000, key=f"batch_timer_refresh::{reviewer}")
-        elif st_autorefresh is not None:
-            st_autorefresh(interval=1000, key=f"batch_timer_refresh::{reviewer}")
-    except Exception:
-        pass
 
 toast_key = f"batch_loaded_toast::{selected_run_id}::{reviewer}"
 

@@ -1,4 +1,3 @@
-app_v*.py
 logs*
 _alt/
 .venv/

@@ -1,6 +1,4 @@
-app_v*.py
 logs*
 _alt/
 .venv/
 __pycache__/
-run_streamlit.bat

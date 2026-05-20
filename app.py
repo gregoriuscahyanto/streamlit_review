@@ -473,7 +473,15 @@ def maybe_cleanup_stale_locks(run_id: str):
             text(
                 """
                 update review.review_cases
-                set status = 'open',
+                set status = case
+                        when exists (
+                            select 1
+                            from review.review_labels rl
+                            where rl.run_id = review_cases.run_id
+                              and rl.pair_key = review_cases.pair_key
+                        ) then 'reviewed'
+                        else 'open'
+                    end,
                     locked_by = null,
                     locked_at = null,
                     updated_at = now()
@@ -502,7 +510,7 @@ def fetch_runs() -> pd.DataFrame:
         from review.review_runs r
         join review.review_cases c
           on r.run_id = c.run_id
-        where c.status in ('open', 'in_review')
+        where c.status in ('open', 'in_review', 'reviewed')
         group by r.run_id, r.left_source, r.right_source
         """
     )
@@ -561,16 +569,23 @@ def fetch_reviewer_total_count(reviewer: str) -> int:
         return int(conn.execute(query, {"reviewer": reviewer}).scalar() or 0)
 
 
-def fetch_global_open_count() -> int:
+def fetch_global_claimable_count(reviewer: str) -> int:
     query = text(
         """
         select count(*)
         from review.review_cases
-        where status = 'open'
+        where status in ('open', 'reviewed')
+          and not exists (
+              select 1
+              from review.review_labels rl
+              where rl.run_id = review_cases.run_id
+                and rl.pair_key = review_cases.pair_key
+                and rl.reviewer = :reviewer
+          )
         """
     )
     with engine.connect() as conn:
-        return int(conn.execute(query).scalar() or 0)
+        return int(conn.execute(query, {"reviewer": reviewer}).scalar() or 0)
 
 
 def get_pair_keys_for_run(run_id: str):
@@ -594,7 +609,14 @@ def claim_case_batch(run_id: str, reviewer: str, batch_size: int):
                     select pair_key
                     from review.review_cases
                     where run_id = :run_id
-                      and status = 'open'
+                      and status in ('open', 'reviewed')
+                      and not exists (
+                          select 1
+                          from review.review_labels rl
+                          where rl.run_id = review_cases.run_id
+                            and rl.pair_key = review_cases.pair_key
+                            and rl.reviewer = :reviewer
+                      )
                     order by random()
                     for update skip locked
                     limit :batch_size
@@ -636,7 +658,15 @@ def release_case_batch(run_id: str, pair_keys: list[str], reviewer: str):
             text(
                 """
                 update review.review_cases
-                set status = 'open',
+                set status = case
+                        when exists (
+                            select 1
+                            from review.review_labels rl
+                            where rl.run_id = review_cases.run_id
+                              and rl.pair_key = review_cases.pair_key
+                        ) then 'reviewed'
+                        else 'open'
+                    end,
                     locked_by = null,
                     locked_at = null,
                     updated_at = now()
@@ -1236,7 +1266,7 @@ progress_value = batch_position / batch_total if batch_total > 0 else 1.0
 reviewed_by_me_total = fetch_reviewer_total_count(reviewer)
 draft_total = len(batch_state.get("completed_pair_keys", []))
 reviewed_by_me_display = reviewed_by_me_total + draft_total
-open_total = fetch_global_open_count()
+claimable_total = fetch_global_claimable_count(reviewer)
 batch_size_total = len(batch_state.get("claimed_pair_keys", [])) or batch_state.get("batch_size", DEFAULT_BATCH_SIZE)
 history_total = len(batch_state.get("history", []))
 
@@ -1270,7 +1300,7 @@ render_sidebar_metric(
 
 st.sidebar.markdown("---")
 st.sidebar.markdown(f"Aktueller Review-Run: **{run_label_map.get(selected_run_id, selected_run_id)}**")
-st.sidebar.markdown(f"Noch offen insgesamt: **{open_total}**")
+st.sidebar.markdown(f"Fuer dich verfuegbar insgesamt: **{claimable_total}**")
 
 tolerance_pct = st.sidebar.number_input(
     "Toleranz in Prozent",

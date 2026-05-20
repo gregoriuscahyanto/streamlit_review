@@ -3,10 +3,12 @@ import json
 import random
 import re
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 from sqlalchemy import create_engine, text
+from sqlalchemy.exc import SQLAlchemyError
 
 st.set_page_config(page_title="Blocking Review", layout="wide")
 
@@ -38,6 +40,14 @@ if not DB_URL:
     st.stop()
 
 engine = get_engine(DB_URL)
+
+
+def write_error_log(msg: str):
+    Path("logs").mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    p = Path("logs") / f"error_{ts}.log"
+    with p.open("a", encoding="utf-8") as f:
+        f.write(f"{datetime.now(timezone.utc).isoformat()} | {msg}\n")
 
 
 # =========================================================
@@ -681,98 +691,112 @@ def release_case_batch(run_id: str, pair_keys: list[str], reviewer: str):
 
 
 def save_case_decision(pair_row: dict, decision: str, comment: str, reviewer: str) -> bool:
-    with engine.begin() as conn:
-        updated = conn.execute(
-            text(
-                """
-                update review.review_cases
-                set status = 'reviewed',
-                    locked_by = null,
-                    locked_at = null,
-                    updated_at = now()
-                where run_id = :run_id
-                  and pair_key = :pair_key
-                  and status = 'in_review'
-                  and locked_by = :reviewer
-                returning pair_id, left_id, right_id
-                """
-            ),
-            {
-                "run_id": pair_row["run_id"],
-                "pair_key": pair_row["pair_key"],
-                "reviewer": reviewer,
-            },
-        ).mappings().first()
+    try:
+        with engine.begin() as conn:
+            updated = conn.execute(
+                text(
+                    """
+                    update review.review_cases
+                    set status = 'reviewed',
+                        locked_by = null,
+                        locked_at = null,
+                        updated_at = now()
+                    where run_id = :run_id
+                      and pair_key = :pair_key
+                      and status = 'in_review'
+                      and locked_by = :reviewer
+                    returning pair_id, left_id, right_id
+                    """
+                ),
+                {
+                    "run_id": pair_row["run_id"],
+                    "pair_key": pair_row["pair_key"],
+                    "reviewer": reviewer,
+                },
+            ).mappings().first()
 
-        if updated is None:
-            return False
+            if updated is None:
+                return False
 
-        conn.execute(
-            text(
-                """
-                insert into review.review_labels (
-                    run_id,
-                    pair_key,
-                    pair_id,
-                    left_id,
-                    right_id,
-                    decision,
-                    comment,
-                    reviewer,
-                    timestamp
-                )
-                values (
-                    :run_id,
-                    :pair_key,
-                    :pair_id,
-                    :left_id,
-                    :right_id,
-                    :decision,
-                    :comment,
-                    :reviewer,
-                    :timestamp
-                )
-                """
-            ),
-            {
-                "run_id": pair_row["run_id"],
-                "pair_key": pair_row["pair_key"],
-                "pair_id": updated["pair_id"],
-                "left_id": updated["left_id"],
-                "right_id": updated["right_id"],
-                "decision": decision,
-                "comment": comment,
-                "reviewer": reviewer,
-                "timestamp": datetime.utcnow(),
-            },
-        )
-
-        remaining = conn.execute(
-            text(
-                """
-                select count(*)
-                from review.review_cases
-                where run_id = :run_id
-                  and status in ('open', 'in_review')
-                """
-            ),
-            {"run_id": pair_row["run_id"]},
-        ).scalar_one()
-
-        if int(remaining) == 0:
             conn.execute(
                 text(
                     """
-                    update review.review_runs
-                    set status = 'reviewed',
-                        updated_at = now()
+                    insert into review.review_labels (
+                        run_id,
+                        pair_key,
+                        pair_id,
+                        left_id,
+                        right_id,
+                        decision,
+                        comment,
+                        reviewer,
+                        timestamp
+                    )
+                    values (
+                        :run_id,
+                        :pair_key,
+                        :pair_id,
+                        :left_id,
+                        :right_id,
+                        :decision,
+                        :comment,
+                        :reviewer,
+                        :timestamp
+                    )
+                    on conflict (run_id, pair_key, reviewer)
+                    do update set
+                        pair_id = excluded.pair_id,
+                        left_id = excluded.left_id,
+                        right_id = excluded.right_id,
+                        decision = excluded.decision,
+                        comment = excluded.comment,
+                        reviewer = excluded.reviewer,
+                        timestamp = excluded.timestamp
+                    """
+                ),
+                {
+                    "run_id": pair_row["run_id"],
+                    "pair_key": pair_row["pair_key"],
+                    "pair_id": updated["pair_id"],
+                    "left_id": updated["left_id"],
+                    "right_id": updated["right_id"],
+                    "decision": decision,
+                    "comment": comment,
+                    "reviewer": reviewer,
+                    "timestamp": datetime.utcnow(),
+                },
+            )
+
+            remaining = conn.execute(
+                text(
+                    """
+                    select count(*)
+                    from review.review_cases
                     where run_id = :run_id
+                      and status in ('open', 'in_review')
                     """
                 ),
                 {"run_id": pair_row["run_id"]},
-            )
+            ).scalar_one()
 
-    return True
+            if int(remaining) == 0:
+                conn.execute(
+                    text(
+                        """
+                        update review.review_runs
+                        set status = 'reviewed',
+                            updated_at = now()
+                        where run_id = :run_id
+                        """
+                    ),
+                    {"run_id": pair_row["run_id"]},
+                )
+        return True
+    except SQLAlchemyError as ex:
+        write_error_log(
+            f"save_case_decision failed run_id={pair_row.get('run_id')} pair_key={pair_row.get('pair_key')} reviewer={reviewer} err={ex}"
+        )
+        return False
 
 
 # =========================================================
@@ -1143,6 +1167,12 @@ def format_remaining_seconds(seconds):
     return f"{minutes:02d}:{sec:02d}"
 
 
+def format_local_hhmm(dt_value):
+    if dt_value is None:
+        return "-"
+    return normalize_to_utc(dt_value).astimezone().strftime("%H:%M")
+
+
 def get_randomized_run_options(run_options: list[str]) -> list[str]:
     if RUN_RANDOM_SEED_KEY not in st.session_state:
         st.session_state[RUN_RANDOM_SEED_KEY] = random.randint(0, 10**9)
@@ -1294,7 +1324,7 @@ else:
 render_sidebar_metric(
     "Zeitlimit Batch",
     left_text,
-    expires_at.strftime("%H:%M") if expires_at is not None else "-",
+    format_local_hhmm(expires_at),
     progress_ratio=ratio_left if ratio_left is not None else 0.0,
 )
 
